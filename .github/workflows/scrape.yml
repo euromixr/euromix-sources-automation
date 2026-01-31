@@ -43,6 +43,6 @@ name: Daily Scraper
 3.  העתק את הטוקן הזה.
 4.  לך לקובץ `App.jsx` בפרויקט הריאקט שלך, ועדכן את השורות האלו:
     ```javascript
-    const TOKEN_SECRET = "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"; 
+    const TOKEN_SECRET = "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"; 
     const GITHUB_OWNER = "euromixr"; 
     const GITHUB_REPO = "euromix-sources-automation"; // השם של ה-Repo החדש

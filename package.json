@@ -1,0 +1,34 @@
+{
+      "name": "euromix-scraper",
+      "version": "1.0.0",
+      "description": "Daily scraper for Euromix sources",
+      "main": "scraper.cjs",
+      "type": "commonjs",
+      "scripts": {
+        "start": "node scraper.cjs"
+      },
+      "dependencies": {
+        "firebase-admin": "^11.11.0",
+        "puppeteer": "^21.5.0"
+      }
+    }
+    ```
+    
+2.  **`scraper.cjs`** (הסקריפט המעודכן):
+    * השתמש בקוד שנתתי לך בתשובה הקודמת (זה שמתאים לפרויקט החדש `euromixsources`).
+    * **חשוב מאוד:** בקוד שנתתי לך יש שורה `require("./service-account.json")`. ב-GitHub, לא נעלה את הקובץ הזה מטעמי אבטחה. במקום זה, נשנה את שורות ההתחלה של הקוד כך:
+
+    ```javascript
+    // החלף את ההתחלה של scraper.cjs בקוד הזה:
+    const admin = require("firebase-admin");
+    const puppeteer = require("puppeteer");
+
+    // קריאת המפתח מתוך משתני סביבה (Secrets)
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
+    if (!admin.apps.length) {
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
+    }
+    // ... שאר הקוד נשאר אותו דבר ...

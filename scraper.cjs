@@ -4,75 +4,47 @@ const puppeteer = require("puppeteer");
 // --- שלב 1: טעינת הגדרות Firebase בצורה מאובטחת ---
 function initFirebase() {
     console.log("🔑 מנסה לטעון את מפתח Firebase...");
-    
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
-    
     if (!serviceAccountRaw) {
-        console.error("❌ שגיאה קריטית: משתנה הסביבה FIREBASE_SERVICE_ACCOUNT חסר!");
-        console.error("נא לוודא שהוספת את הסוד ב-Settings -> Secrets -> Actions בגיטהאב.");
+        console.error("❌ שגיאה: FIREBASE_SERVICE_ACCOUNT חסר ב-Secrets.");
         process.exit(1);
     }
-
     try {
         const serviceAccount = JSON.parse(serviceAccountRaw);
-        
         if (!admin.apps.length) {
-            admin.initializeApp({
-                credential: admin.credential.cert(serviceAccount)
-            });
+            admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
         }
-        console.log("✅ חיבור ל-Firebase הצליח.");
         return admin.firestore();
     } catch (error) {
-        console.error("❌ שגיאה בפענוח ה-JSON של המפתח:", error.message);
-        console.error("ודא שהעתקת את כל תוכן הקובץ service-account.json כולל הסוגריים המסולסלים {} להתחלה ולסוף.");
+        console.error("❌ שגיאה בפענוח מפתח:", error.message);
         process.exit(1);
     }
 }
 
 const db = initFirebase();
-const APP_ID = 'euromix-pro-v4-wp'; // וודא שזה תואם ל-App.jsx
+const APP_ID = 'euromix-pro-v4-wp'; 
 const TARGET_URL = "https://www.euromix.co.il/a123/";
 
-// --- שלב 2: פונקציית הסריקה ---
+// --- שלב 2: סריקה ---
 async function run() {
     console.log("🚀 מתחיל ריצה...");
-    
     let browser;
     try {
-        console.log("🌐 מפעיל דפדפן (Puppeteer)...");
         browser = await puppeteer.launch({ 
             headless: "new",
-            args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--disable-gpu'
-            ] 
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process', '--no-zygote'] 
         });
         
         const page = await browser.newPage();
-        
-        // הגדרת User Agent כדי לא להיחסם
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
         
-        await updateStatusTime();
+        await updateStatusTime(); // עדכון זמן ריצה אחרון
 
-        console.log(`🔗 ניגש לכתובת: ${TARGET_URL}`);
         await page.setViewport({ width: 1920, height: 1080 });
-        
-        // הגדלת זמן המתנה ל-3 דקות למקרה שהאתר איטי
-        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 180000 });
-        
-        console.log("📜 גולל למטה לטעינת תוכן...");
+        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 120000 });
         await aggressiveAutoScroll(page);
 
-        // --- חילוץ המידע ---
-        console.log("mag searching for articles...");
+        // חילוץ הנתונים
         const articles = await page.evaluate(() => {
             const results = [];
             const allLinks = document.querySelectorAll('a');
@@ -80,13 +52,13 @@ async function run() {
             const parseRelativeTime = (text) => {
                 if (!text) return new Date().toISOString();
                 const now = new Date();
-                const cleanText = text.toLowerCase();
-                const match = cleanText.match(/(\d+)/);
+                const match = text.toLowerCase().match(/(\d+)/);
                 if (!match) return now.toISOString();
                 const num = parseInt(match[0]);
-                if (cleanText.includes('דק') || cleanText.includes('min')) now.setMinutes(now.getMinutes() - num);
-                else if (cleanText.includes('שע') || cleanText.includes('hour')) now.setHours(now.getHours() - num);
-                else if (cleanText.includes('יום') || cleanText.includes('ימים') || cleanText.includes('day')) now.setDate(now.getDate() - num);
+                const clean = text.toLowerCase();
+                if (clean.includes('דק') || clean.includes('min')) now.setMinutes(now.getMinutes() - num);
+                else if (clean.includes('שע') || clean.includes('hour')) now.setHours(now.getHours() - num);
+                else if (clean.includes('יום') || clean.includes('day')) now.setDate(now.getDate() - num);
                 return now.toISOString();
             };
 
@@ -95,34 +67,28 @@ async function run() {
                 let title = link.innerText.trim();
                 
                 if (!href || href.length < 10) return;
-                // סינון קישורים פנימיים ורשתות חברתיות
-                if (href.includes('euromix.co.il') || href.includes('facebook.com') || href.includes('twitter.com') || href.includes('whatsapp.com')) return;
+                if (href.includes('facebook.com') || href.includes('twitter.com') || href.includes('whatsapp.com')) return;
                 if (title.length < 10) return;
 
-                // חיפוש תאריך
+                // בדיקת תאריך (פשוטה)
                 let dateStr = null;
                 let container = link.parentElement;
                 let depth = 0;
                 while (container && !dateStr && depth < 3) {
-                    if ((container.innerText.includes('לפני') || container.innerText.includes('ago')) && /\d/.test(container.innerText)) {
-                         const lines = container.innerText.split('\n');
-                         const timeLine = lines.find(l => (l.includes('לפני') || l.includes('ago')) && /\d/.test(l));
-                         if (timeLine) dateStr = timeLine;
+                    if (/\d/.test(container.innerText) && (container.innerText.includes('לפני') || container.innerText.includes('ago'))) {
+                         dateStr = container.innerText;
                     }
                     container = container.parentElement;
                     depth++;
                 }
 
-                // חיפוש תמונה
+                // בדיקת תמונה
                 let img = null;
                 container = link.parentElement;
                 depth = 0;
                 while (container && !img && depth < 4) {
                     const foundImg = container.querySelector('img');
-                    if (foundImg) {
-                        img = foundImg.src || foundImg.getAttribute('data-src');
-                        if (img && (img.includes('icon') || img.includes('logo'))) img = null;
-                    }
+                    if (foundImg) img = foundImg.src || foundImg.getAttribute('data-src');
                     container = container.parentElement;
                     depth++;
                 }
@@ -137,24 +103,23 @@ async function run() {
             });
             return results;
         });
-        
-        console.log(`✅ נמצאו ${articles.length} כתבות פוטנציאליות.`);
 
-        // סינון כפילויות בתוך הריצה הנוכחית
+        // סינון כפילויות מקומי
         const uniqueArticles = Array.from(new Map(articles.map(item => [item.link, item])).values());
-        
-        console.log(`💾 שומר ${uniqueArticles.length} כתבות ייחודיות ל-Firebase...`);
+        console.log(`🔎 נמצאו ${uniqueArticles.length} כתבות בדף.`);
+
         const batch = db.batch();
         let operationCount = 0;
         let savedCount = 0;
 
+        // שמירה חכמה: קודם בודקים אם קיים (כדי לא לבזבז כתיבות)
+        // הערה: קריאה (Read) זולה יותר מכתיבה (Write)
         for (const article of uniqueArticles) {
-            // בדיקה אם הכתבה כבר קיימת כדי לא לדרוס סטטוסים
-            const exists = await db.collection('artifacts').doc(APP_ID)
+            const existsQuery = await db.collection('artifacts').doc(APP_ID)
                 .collection('public').doc('data').collection('articles')
                 .where('link', '==', article.link).limit(1).get();
 
-            if (!exists.empty) continue;
+            if (!existsQuery.empty) continue;
 
             const docRef = db.collection('artifacts').doc(APP_ID)
                 .collection('public').doc('data').collection('articles').doc();
@@ -162,8 +127,8 @@ async function run() {
             batch.set(docRef, {
                 ...article,
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                status: 'new',
-                flagged: false, 
+                status: 'new', // סטטוס התחלתי
+                flagged: false,
                 publishedSite: false,
                 publishedSocialHe: false,
                 publishedSocialEn: false,
@@ -175,96 +140,80 @@ async function run() {
             
             savedCount++;
             operationCount++;
-            if (operationCount >= 450) { await batch.commit(); operationCount = 0; }
         }
 
-        if (operationCount > 0) await batch.commit();
-        console.log(`✨ ${savedCount} כתבות חדשות נשמרו.`);
+        if (operationCount > 0) {
+            await batch.commit();
+            console.log(`💾 נשמרו ${savedCount} כתבות חדשות.`);
+        } else {
+            console.log("👌 לא נמצאו כתבות חדשות לשמירה.");
+        }
         
-        // --- ניקוי מסד נתונים ---
-        await cleanupDatabaseSmart();
+        // --- ניקוי אופטימלי (Quota Safe) ---
+        await cleanupQuotaSafe();
         
-        await updateStatusTime();
-        console.log("🎉 התהליך הסתיים בהצלחה.");
+        console.log("🎉 סריקה הסתיימה.");
 
     } catch (e) {
-        console.error("❌ שגיאה כללית במהלך הריצה:", e);
-        process.exit(1); // יציאה עם שגיאה כדי שגיטהאב יסמן באדום
+        console.error("❌ שגיאה:", e);
+        process.exit(1);
     } finally {
-        if (browser) {
-            await browser.close();
-        }
-        // Force exit to ensure script doesn't hang
-        setTimeout(() => process.exit(0), 1000);
+        if (browser) await browser.close();
+        setTimeout(() => process.exit(0), 2000);
     }
 }
 
-// === פונקציית הניקוי החדשה והחכמה ===
-async function cleanupDatabaseSmart() {
-    console.log("🧹 מתחיל ניקוי חכם...");
+// === פונקציית ניקוי חסכונית במיוחד ===
+async function cleanupQuotaSafe() {
+    console.log("🧹 מבצע ניקוי חסכוני (רק סטטוס 'new')...");
     try {
         const articlesRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
-        const snapshot = await articlesRef.get();
         
-        if (snapshot.empty) {
-            console.log("📭 אין כתבות במסד הנתונים.");
-            return;
-        }
+        // טריק לחיסכון: אנחנו שולפים רק כתבות בסטטוס 'new'
+        // אנו מניחים שכתבות שטופלו ('in_writing', 'published') חשובות ולא מוחקים אותן אוטומטית כרגע
+        // כדי לא לקרוא אלפי מסמכים סתם.
+        const snapshot = await articlesRef.where('status', '==', 'new').get();
+        
+        if (snapshot.empty) return;
 
-        const now = new Date();
+        const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data(), ref: d.ref }));
+        
+        // מיון לפי תאריך (מהחדש לישן)
+        docs.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
+
         const batch = db.batch();
         let deleteCount = 0;
+        const now = new Date();
 
-        let allDocs = snapshot.docs.map(d => ({ id: d.id, ...d.data(), ref: d.ref }));
-
-        // שמירת כתבות בטיפול
-        const activeDocs = allDocs.filter(d => 
-            d.status !== 'new' && d.status !== 'archived' && !d.isManual
-        );
+        // חוק 1: שמור רק את ה-100 החדשות ביותר בסטטוס 'new' (מונע הצפה)
+        const KEEP_NEW_LIMIT = 100;
         
-        // מועמדות למחיקה
-        let candidatesForDeletion = allDocs.filter(d => 
-            d.status === 'new' || d.status === 'archived'
-        );
-
-        candidatesForDeletion.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
-
+        // חוק 2: מחק כל מה שישן מ-4 ימים (בסטטוס 'new' בלבד)
         const MAX_DAYS = 4;
-        const idsToDelete = new Set();
 
-        candidatesForDeletion.forEach(doc => {
+        docs.forEach((doc, index) => {
+            let shouldDelete = false;
+
+            // בדיקת זמן
             const pubDate = new Date(doc.pubDate);
             const diffDays = (now - pubDate) / (1000 * 60 * 60 * 24);
-            if (diffDays > MAX_DAYS) {
-                idsToDelete.add(doc.id);
-            }
-        });
+            if (diffDays > MAX_DAYS) shouldDelete = true;
 
-        let remainingCandidates = candidatesForDeletion.filter(d => !idsToDelete.has(d.id));
-        const totalProjected = activeDocs.length + remainingCandidates.length;
-        const LIMIT = 300;
+            // בדיקת כמות (אם עברנו את ה-100 בתור)
+            if (index >= KEEP_NEW_LIMIT) shouldDelete = true;
 
-        if (totalProjected > LIMIT) {
-            const toDeleteCount = totalProjected - LIMIT;
-            const extraDeletes = remainingCandidates.slice(-toDeleteCount);
-            extraDeletes.forEach(d => idsToDelete.add(d.id));
-        }
-
-        allDocs.forEach(d => {
-            if (idsToDelete.has(d.id)) {
-                batch.delete(d.ref);
+            if (shouldDelete) {
+                batch.delete(doc.ref);
                 deleteCount++;
             }
         });
 
         if (deleteCount > 0) {
             await batch.commit();
-            console.log(`🗑️ נמחקו ${deleteCount} כתבות.`);
-        } else {
-            console.log("👍 המערכת נקייה.");
+            console.log(`🗑️ נמחקו ${deleteCount} כתבות 'new' ישנות/עודפות.`);
         }
     } catch (error) {
-        console.error("⚠️ שגיאה במהלך הניקוי (לא קריטי):", error.message);
+        console.error("⚠️ שגיאה בניקוי:", error.message);
     }
 }
 
@@ -273,15 +222,14 @@ async function aggressiveAutoScroll(page) {
         await new Promise((resolve) => {
             let totalHeight = 0;
             const distance = 100;
-            let noChangeCount = 0;
+            let count = 0;
             const timer = setInterval(() => {
-                const scrollHeight = document.body.scrollHeight;
                 window.scrollBy(0, distance);
                 totalHeight += distance;
-                if (totalHeight >= scrollHeight - window.innerHeight) {
-                    noChangeCount++;
-                    if (noChangeCount > 40) { clearInterval(timer); resolve(); }
-                } else { noChangeCount = 0; }
+                count++;
+                if (count > 30 || totalHeight >= document.body.scrollHeight) { 
+                    clearInterval(timer); resolve(); 
+                }
             }, 50);
         });
     });

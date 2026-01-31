@@ -2,9 +2,9 @@ name: Daily Scraper
 
 on:
   schedule:
-    # Run every hour
-    - cron: '0 * * * *'
-  workflow_dispatch: # Allows manual triggering
+    # Run every 4 hours (saves quota)
+    - cron: '0 */4 * * *'
+  workflow_dispatch: # Manual trigger
 
 jobs:
   scrape:

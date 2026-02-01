@@ -1,10 +1,10 @@
-name: Daily Scraper
+name: EuroMix Scraper
 
 on:
   schedule:
-    # Run every 4 hours (saves quota)
-    - cron: '0 */4 * * *'
-  workflow_dispatch: # Manual trigger
+    # Run every 30 minutes (Safe now due to optimized script)
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Allows manual triggering
 
 jobs:
   scrape:
@@ -19,9 +19,11 @@ jobs:
           node-version: 18
 
       - name: Install dependencies
+        # This installs packages defined in package.json
         run: npm install
 
       - name: Run Scraper
         env:
+          # Direct injection of the secret to the process environment
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: node scraper.cjs

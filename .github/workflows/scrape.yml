@@ -2,15 +2,13 @@ name: EuroMix Scraper
 
 on:
   schedule:
-    # Run every 30 minutes (Safe now due to optimized script)
-    - cron: '*/30 * * * *'
-  workflow_dispatch: # Allows manual triggering
+    - cron: '0 */2 * * *'  # ← שונה לכל שעתיים!
+  workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     
-    # מונע הרצה של מספר instances במקביל
     concurrency:
       group: euromix-scraper
       cancel-in-progress: false
@@ -23,8 +21,6 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: 18
-          cache: 'npm'
-          cache-dependency-path: './package-lock.json'  # ← זה התיקון!
 
       - name: Install dependencies
         run: npm install

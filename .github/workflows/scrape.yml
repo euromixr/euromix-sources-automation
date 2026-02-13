@@ -9,6 +9,12 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    
+    # מונע הרצה של מספר instances במקביל
+    concurrency:
+      group: euromix-scraper
+      cancel-in-progress: false
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -17,13 +23,19 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: 18
+          cache: 'npm'  # מאיץ את ההתקנה משמעותית
 
       - name: Install dependencies
-        # This installs packages defined in package.json
         run: npm install
 
       - name: Run Scraper
         env:
-          # Direct injection of the secret to the process environment
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-        run: node scraper.cjs
+        run: |
+          echo "🚀 Starting scraper at $(date)"
+          node scraper.cjs
+          echo "✅ Finished scraper at $(date)"
+        
+      - name: Notify on failure
+        if: failure()
+        run: echo "❌ Scraper failed! Check the logs above."

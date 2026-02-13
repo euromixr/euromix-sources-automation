@@ -23,7 +23,8 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: 18
-          cache: 'npm'  # מאיץ את ההתקנה משמעותית
+          cache: 'npm'
+          cache-dependency-path: './package-lock.json'  # ← זה התיקון!
 
       - name: Install dependencies
         run: npm install

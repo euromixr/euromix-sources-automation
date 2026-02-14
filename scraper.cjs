@@ -25,9 +25,10 @@ const APP_ID = 'euromix-pro-v4-wp';
 const TARGET_URL = "https://www.euromix.co.il/a123/";
 
 // === הגדרות תצורה ===
-const MAX_ARTICLE_AGE_HOURS = 48;        // כתבות חדשות רק מ-48 שעות (מרווח בטיחות)
-const MAX_NEW_ARTICLES = 500;            // מקסימום כתבות בסטטוס 'new'
-const KEEP_IN_PROGRESS_DAYS = 14;        // כתבות בעבודה נשמרות 14 יום
+const MAX_ARTICLE_AGE_HOURS = 24;
+const MAX_NEW_ARTICLES = 1000;
+const KEEP_IN_PROGRESS_DAYS = 14;
+const FIRESTORE_BATCH_LIMIT = 500;
 
 async function run() {
     console.log("🚀 מתחיל ריצה...");
@@ -47,144 +48,141 @@ async function run() {
         await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 180000 });
         await aggressiveAutoScroll(page);
 
-        // --- חילוץ כתבות ---
+        // --- חילוץ כתבות - גישה חדשה עם מבנה ממוקד ---
         const articles = await page.evaluate(() => {
             const results = [];
-            const allLinks = document.querySelectorAll('a');
+            
+            // מחפש את כל האלמנטים שמכילים "Published on"
+            const publishedElements = Array.from(document.querySelectorAll('*')).filter(el => 
+                el.textContent.includes('Published on') && 
+                el.textContent.match(/\d+\s+(hour|hours|day|days|minute|minutes)\s+ago/i)
+            );
 
-            const parseRelativeTime = (text) => {
-                if (!text) return new Date().toISOString();
-                const now = new Date();
-                const cleanText = text.toLowerCase();
-                const match = cleanText.match(/(\d+)/);
-                if (!match) return now.toISOString();
-                const num = parseInt(match[0]);
-                if (cleanText.includes('דק') || cleanText.includes('min')) now.setMinutes(now.getMinutes() - num);
-                else if (cleanText.includes('שע') || cleanText.includes('hour')) now.setHours(now.getHours() - num);
-                else if (cleanText.includes('יום') || cleanText.includes('ימים') || cleanText.includes('day')) now.setDate(now.getDate() - num);
-                return now.toISOString();
-            };
+            console.log(`Found ${publishedElements.length} elements with "Published on"`);
 
-            allLinks.forEach(link => {
+            publishedElements.forEach(pubElement => {
+                // מחפש את הקישור הקרוב ביותר (למעלה או לצד)
+                let articleContainer = pubElement.parentElement;
+                let link = null;
+                let depth = 0;
+                
+                // מחפש את הקונטיינר שמכיל גם קישור וגם תאריך
+                while (articleContainer && depth < 5) {
+                    link = articleContainer.querySelector('a[href]');
+                    if (link && link.href && link.href.length > 10) {
+                        // מצא קישור תקין
+                        break;
+                    }
+                    articleContainer = articleContainer.parentElement;
+                    depth++;
+                }
+
+                if (!link || !link.href) return;
+                
                 const href = link.href;
-                let title = link.innerText.trim();
+                let title = link.innerText.trim() || link.textContent.trim();
                 
-                if (!href || href.length < 10) return;
-                
-                if (href.includes('euromix.co.il') || href.includes('facebook.com') || 
-                    href.includes('twitter.com') || href.includes('whatsapp.com')) return;
+                // סינונים בסיסיים
+                if (href.includes('euromix.co.il') || 
+                    href.includes('facebook.com') || 
+                    href.includes('twitter.com') || 
+                    href.includes('whatsapp.com')) return;
                 
                 if (title.length < 10) return;
 
-                let dateStr = null;
-                let container = link.parentElement;
-                let depth = 0;
-                while (container && !dateStr && depth < 3) {
-                    if ((container.innerText.includes('לפני') || container.innerText.includes('ago')) && /\d/.test(container.innerText)) {
-                         const lines = container.innerText.split('\n');
-                         const timeLine = lines.find(l => (l.includes('לפני') || l.includes('ago')) && /\d/.test(l));
-                         if (timeLine) dateStr = timeLine;
-                    }
-                    container = container.parentElement;
-                    depth++;
+                // חילוץ התאריך מה-"Published on" element
+                const publishedText = pubElement.textContent;
+                const timeMatch = publishedText.match(/(\d+)\s+(hour|hours|day|days|minute|minutes)\s+ago/i);
+                
+                if (!timeMatch) return;
+                
+                const num = parseInt(timeMatch[1]);
+                const unit = timeMatch[2].toLowerCase();
+                
+                const now = new Date();
+                if (unit.startsWith('minute')) {
+                    now.setMinutes(now.getMinutes() - num);
+                } else if (unit.startsWith('hour')) {
+                    now.setHours(now.getHours() - num);
+                } else if (unit.startsWith('day')) {
+                    now.setDate(now.getDate() - num);
                 }
+                
+                const pubDate = now.toISOString();
 
+                // חיפוש תמונה באותו קונטיינר
                 let img = null;
-                container = link.parentElement;
-                depth = 0;
-                while (container && !img && depth < 4) {
-                    const foundImg = container.querySelector('img');
+                if (articleContainer) {
+                    const foundImg = articleContainer.querySelector('img');
                     if (foundImg) {
-                        img = foundImg.src || foundImg.getAttribute('data-src');
-                        if (img && (img.includes('icon') || img.includes('logo'))) img = null;
+                        img = foundImg.src || foundImg.getAttribute('data-src') || foundImg.getAttribute('srcset');
+                        // מסנן אייקונים
+                        if (img && (img.includes('icon') || img.includes('logo') || img.length < 20)) {
+                            img = null;
+                        }
                     }
-                    container = container.parentElement;
-                    depth++;
                 }
 
+                // חילוץ מקור
                 let source = "Unknown";
-                try { const urlObj = new URL(href); source = urlObj.hostname.replace('www.', ''); } catch (e) {}
+                try { 
+                    const urlObj = new URL(href); 
+                    source = urlObj.hostname.replace('www.', ''); 
+                } catch (e) {}
 
                 results.push({
-                    title: title, link: href, source: source, img: img,
-                    pubDate: parseRelativeTime(dateStr), snippet: title
+                    title: title,
+                    link: href,
+                    source: source,
+                    img: img,
+                    pubDate: pubDate,
+                    publishedText: publishedText.trim().substring(0, 50), // לדיבוג
+                    snippet: title
                 });
             });
+
             return results;
         });
 
         // סינון כפילויות
         const uniqueArticles = Array.from(new Map(articles.map(item => [item.link, item])).values());
-        console.log(`🔎 נמצאו ${uniqueArticles.length} כתבות בדף.`);
+        console.log(`🔎 נמצאו ${uniqueArticles.length} כתבות ייחודיות עם תאריך.`);
 
-        // --- סינון כתבות רק מ-48 שעות אחרונות ---
+        // דוגמאות לדיבוג
+        if (uniqueArticles.length > 0) {
+            console.log(`📝 דוגמאות (3 ראשונות):`, 
+                uniqueArticles.slice(0, 3).map(a => ({
+                    title: a.title.substring(0, 40),
+                    published: a.publishedText
+                }))
+            );
+        }
+
+        // --- סינון כתבות מ-24 שעות בלבד ---
         const now = new Date();
-        const cutoffDate = new Date(now.getTime() - (MAX_ARTICLE_AGE_HOURS * 60 * 60 * 1000));
+        const oneDayAgo = new Date(now.getTime() - (MAX_ARTICLE_AGE_HOURS * 60 * 60 * 1000));
         
         const recentArticles = uniqueArticles.filter(article => {
             const articleDate = new Date(article.pubDate);
-            return articleDate >= cutoffDate;
+            return articleDate >= oneDayAgo && articleDate <= now;
         });
         
-        console.log(`⏰ מתוכן ${uniqueArticles.length} כתבות, ${recentArticles.length} הן מ-${MAX_ARTICLE_AGE_HOURS} שעות אחרונות.`);
+        console.log(`⏰ ${recentArticles.length} כתבות מ-${MAX_ARTICLE_AGE_HOURS} שעות אחרונות.`);
 
-        // --- קריאת כתבות קיימות רק מ-48 שעות (במקום הכל!) ---
-        const fortyEightHoursAgo = new admin.firestore.Timestamp(
-            Math.floor(Date.now() / 1000) - (48 * 60 * 60),
-            0
-        );
-
-        const existingArticlesSnapshot = await db.collection('artifacts').doc(APP_ID)
-            .collection('public').doc('data').collection('articles')
-            .where('createdAt', '>=', fortyEightHoursAgo)
-            .get();
-
-        const existingLinks = new Set(
-            existingArticlesSnapshot.docs.map(doc => doc.data().link)
-        );
-
-        console.log(`📚 נמצאו ${existingLinks.size} כתבות קיימות מ-48 שעות אחרונות ב-Firestore.`);
-
-        // --- שמירת כתבות חדשות בלבד ---
-        const newArticles = recentArticles.filter(article => !existingLinks.has(article.link));
-
-        if (newArticles.length > 0) {
-            const articlesCollection = db.collection('artifacts').doc(APP_ID)
-                .collection('public').doc('data').collection('articles');
-
-            const batch = db.batch();
+        // --- שמירה ב-Firestore ---
+        if (recentArticles.length > 0) {
+            const articlesToSave = recentArticles.slice(0, MAX_NEW_ARTICLES);
             
-            newArticles.forEach(article => {
-                // יצירת ID ייחודי מהקישור
-                const articleId = Buffer.from(article.link)
-                    .toString('base64')
-                    .replace(/[^a-zA-Z0-9]/g, '')
-                    .substring(0, 60);
-                
-                const docRef = articlesCollection.doc(articleId);
-                
-                batch.set(docRef, {
-                    ...article,
-                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                    status: 'new',
-                    flagged: false,
-                    publishedSite: false,
-                    publishedSocialHe: false,
-                    publishedSocialEn: false,
-                    translationComplete: false,
-                    assignedTo: null,
-                    isCustom: false,
-                    hasCountedWriting: false
-                });
-            });
+            if (articlesToSave.length < recentArticles.length) {
+                console.log(`⚠️ מגביל ל-${MAX_NEW_ARTICLES} כתבות.`);
+            }
             
-            await batch.commit();
-            console.log(`💾 נוספו ${newArticles.length} כתבות חדשות.`);
+            await saveToBatches(articlesToSave);
         } else {
-            console.log("👌 אין כתבות חדשות להוספה.");
+            console.log("👌 אין כתבות חדשות לשמירה.");
         }
 
-        // --- ניקוי חכם ---
+        // --- ניקוי ---
         await cleanupOldArticles();
 
         await updateStatusTime();
@@ -199,7 +197,56 @@ async function run() {
     }
 }
 
-// === פונקציית ניקוי חכמה ===
+// === שמירה ב-batches ===
+async function saveToBatches(articles) {
+    const articlesCollection = db.collection('artifacts').doc(APP_ID)
+        .collection('public').doc('data').collection('articles');
+
+    let totalSaved = 0;
+    
+    for (let i = 0; i < articles.length; i += FIRESTORE_BATCH_LIMIT) {
+        const chunk = articles.slice(i, i + FIRESTORE_BATCH_LIMIT);
+        const batch = db.batch();
+        
+        chunk.forEach(article => {
+            const articleId = Buffer.from(article.link)
+                .toString('base64')
+                .replace(/[^a-zA-Z0-9]/g, '')
+                .substring(0, 60);
+            
+            const docRef = articlesCollection.doc(articleId);
+            
+            // מסירים publishedText לפני שמירה
+            const { publishedText, ...articleData } = article;
+            
+            batch.set(docRef, {
+                ...articleData,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                status: 'new',
+                flagged: false,
+                publishedSite: false,
+                publishedSocialHe: false,
+                publishedSocialEn: false,
+                translationComplete: false,
+                assignedTo: null,
+                isCustom: false,
+                hasCountedWriting: false
+            }, { merge: true });
+        });
+        
+        await batch.commit();
+        totalSaved += chunk.length;
+        console.log(`💾 נשמרו ${chunk.length} כתבות (סה"כ ${totalSaved}/${articles.length})`);
+        
+        if (i + FIRESTORE_BATCH_LIMIT < articles.length) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+    }
+    
+    console.log(`✅ סה"כ נשמרו ${totalSaved} כתבות.`);
+}
+
+// === ניקוי ===
 async function cleanupOldArticles() {
     console.log("🧹 מתחיל ניקוי...");
     try {
@@ -208,83 +255,63 @@ async function cleanupOldArticles() {
         
         const now = admin.firestore.Timestamp.now();
         
-        // 1. מחיקת כתבות 'new' מעל 48 שעות
-        const twoDaysAgo = new admin.firestore.Timestamp(
-            now.seconds - (48 * 60 * 60), 
+        // 1. מחיקת 'new' מעל 24 שעות
+        const oneDayAgo = new admin.firestore.Timestamp(
+            now.seconds - (MAX_ARTICLE_AGE_HOURS * 60 * 60), 
             now.nanoseconds
         );
         
         const oldNewArticles = await articlesRef
             .where('status', '==', 'new')
-            .where('createdAt', '<', twoDaysAgo)
+            .where('createdAt', '<', oneDayAgo)
             .limit(200)
             .get();
         
         if (!oldNewArticles.empty) {
-            const batch1 = db.batch();
-            oldNewArticles.docs.forEach(doc => batch1.delete(doc.ref));
-            await batch1.commit();
-            console.log(`🗑️ נמחקו ${oldNewArticles.size} כתבות 'new' ישנות (מעל 48 שעות).`);
+            await deleteInBatches(oldNewArticles.docs);
+            console.log(`🗑️ נמחקו ${oldNewArticles.size} כתבות 'new' ישנות.`);
         }
 
-        // 2. מחיקת כתבות בעבודה (לא 'new') מעל 14 יום
+        // 2. מחיקת כתבות בעבודה מעל 14 יום
         const fourteenDaysAgo = new admin.firestore.Timestamp(
             now.seconds - (KEEP_IN_PROGRESS_DAYS * 24 * 60 * 60), 
             now.nanoseconds
         );
         
         const oldInProgressArticles = await articlesRef
+            .where('status', '!=', 'new')
             .where('createdAt', '<', fourteenDaysAgo)
             .limit(100)
             .get();
         
         if (!oldInProgressArticles.empty) {
-            const batch2 = db.batch();
-            oldInProgressArticles.docs.forEach(doc => {
-                if (doc.data().status !== 'new') {
-                    batch2.delete(doc.ref);
-                }
-            });
-            await batch2.commit();
-            console.log(`🗑️ נמחקו כתבות בעבודה ישנות (מעל 14 יום).`);
+            await deleteInBatches(oldInProgressArticles.docs);
+            console.log(`🗑️ נמחקו ${oldInProgressArticles.size} כתבות בעבודה ישנות.`);
         }
 
-        // 3. בדיקת מכסת כתבות 'new'
+        // 3. בדיקת מכסה
         const newArticlesSnapshot = await articlesRef
             .where('status', '==', 'new')
             .count()
             .get();
         
         const totalNewArticles = newArticlesSnapshot.data().count;
-        console.log(`📊 סה"כ כתבות 'new' במערכת: ${totalNewArticles}`);
-        
-        if (totalNewArticles > MAX_NEW_ARTICLES) {
-            const excess = totalNewArticles - MAX_NEW_ARTICLES;
-            console.log(`⚠️ יש ${excess} כתבות 'new' מעבר למכסה. מוחק את הישנות ביותר...`);
-            
-            const oldestNewArticles = await articlesRef
-                .where('status', '==', 'new')
-                .orderBy('createdAt', 'asc')
-                .limit(excess + 50)
-                .get();
-            
-            if (!oldestNewArticles.empty) {
-                const batch3 = db.batch();
-                oldestNewArticles.docs.forEach(doc => batch3.delete(doc.ref));
-                await batch3.commit();
-                console.log(`🗑️ נמחקו ${oldestNewArticles.size} כתבות 'new' ישנות נוספות.`);
-            }
-        } else {
-            console.log(`✅ מספר כתבות 'new' תקין (${totalNewArticles}/${MAX_NEW_ARTICLES}).`);
-        }
+        console.log(`📊 סה"כ כתבות 'new': ${totalNewArticles}`);
         
     } catch (error) {
         console.error("⚠️ שגיאה בניקוי:", error.message);
-        if (error.message.includes('index')) {
-            console.log("💡 צריך ליצור composite index ב-Firestore.");
-            console.log("פתח את הלינק שמופיע בשגיאה או צור ידנית:");
-            console.log("- Collection: articles");
-            console.log("- Fields: status (Ascending) + createdAt (Ascending)");
+    }
+}
+
+async function deleteInBatches(docs) {
+    for (let i = 0; i < docs.length; i += FIRESTORE_BATCH_LIMIT) {
+        const chunk = docs.slice(i, i + FIRESTORE_BATCH_LIMIT);
+        const batch = db.batch();
+        chunk.forEach(doc => batch.delete(doc.ref));
+        await batch.commit();
+        
+        if (i + FIRESTORE_BATCH_LIMIT < docs.length) {
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
     }
 }

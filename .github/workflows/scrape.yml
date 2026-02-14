@@ -30,7 +30,7 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: |
           echo "🚀 Starting scraper at $(date)"
-          node scraper-new.cjs
+          node scraper.cjs
           echo "✅ Finished scraper at $(date)"
         
       - name: Notify on failure

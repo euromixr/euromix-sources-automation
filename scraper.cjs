@@ -3,23 +3,16 @@ const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 
-function initFirebase() {
-    const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
-    if (!serviceAccountRaw) {
-        console.error("❌ FIREBASE_SERVICE_ACCOUNT missing");
-        process.exit(1);
-    }
-    try {
-        const serviceAccount = JSON.parse(serviceAccountRaw);
-        if (!admin.apps.length) {
-            admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-        }
-        return admin.firestore();
-    } catch (error) {
-        console.error("❌ Error parsing key:", error.message);
-        process.exit(1);
-    }
+// לריצה מקומית - service-account.json צריך להיות באותה תיקייה
+const serviceAccount = require("./service-account.json");
+
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
 }
+
+const db = admin.firestore();
 
 const db = initFirebase();
 const APP_ID = 'euromix-pro-v4-wp';
@@ -33,20 +26,22 @@ console.log("🔥 Running - 24h articles only, skip existing!");
 let browser;
 
 try {
-    browser = await puppeteer.launch({ 
-        headless: "new",
-        args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox', 
-            '--disable-dev-shm-usage', 
-            '--disable-accelerated-2d-canvas', 
-            '--disable-gpu', 
-            '--single-process',
-            '--disable-blink-features=AutomationControlled'
-        ] 
-    });
-    
-    const page = await browser.newPage();
+  browser = await puppeteer.launch({ 
+    headless: "new",
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: [
+      '--no-sandbox', 
+      '--disable-setuid-sandbox', 
+      '--disable-dev-shm-usage', 
+      '--disable-accelerated-2d-canvas', 
+      '--disable-gpu', 
+      '--single-process',
+      '--disable-blink-features=AutomationControlled'
+    ] 
+  });
+  
+  const page = await browser.newPage();
+
     
     // ✅ הוסף user agent וכותרות
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');

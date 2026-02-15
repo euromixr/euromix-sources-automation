@@ -249,12 +249,3 @@ async function updateStatusTime() {
 
 run();
 
-        await db.collection('artifacts').doc(APP_ID).collection('public').doc('data')
-            .collection('settings').doc('status')
-            .set({ lastScrape: admin.firestore.Timestamp.now() }, { merge: true });
-    } catch(e) {
-        console.error("Status update error:", e.message);
-    }
-}
-
-run();

@@ -23,74 +23,101 @@ const db = initFirebase();
 const APP_ID = 'euromix-pro-v4-wp';
 const TARGET_URL = "https://www.euromix.co.il/a123/";
 const MAX_ARTICLE_AGE_HOURS = 24;
-const MAX_NEW_ARTICLES = 500;
-const KEEP_IN_PROGRESS_DAYS = 14;
+const MAX_NEW_ARTICLES = 300;
 const FIRESTORE_BATCH_LIMIT = 500;
 
 async function run() {
-    console.log("🔥 NEW VERSION RUNNING!");
+    console.log("🔥 Running - 24h articles only, skip existing!");
     let browser;
+    
     try {
         browser = await puppeteer.launch({ 
             headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--disable-gpu', '--single-process', '--no-zygote'] 
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--disable-gpu', '--single-process'] 
         });
         
         const page = await browser.newPage();
         await updateStatusTime();
+        
+        // ✅ טען את כל ה-IDs הקיימים פעם אחת בלבד!
+        console.log("🔍 Loading existing article IDs...");
+        const existingIds = await getExistingArticleIds();
+        console.log(`📋 Found ${existingIds.size} existing articles in DB`);
+        
         await page.setViewport({ width: 1920, height: 1080 });
+        console.log("📡 Loading page...");
         await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 180000 });
+        
+        console.log("📜 Scrolling...");
         await aggressiveAutoScroll(page);
 
+        console.log("🔍 Extracting articles...");
         const articles = await page.evaluate(() => {
             const results = [];
-            const publishedElements = Array.from(document.querySelectorAll('*')).filter(el => 
-                el.textContent.includes('Published on') && 
-                el.textContent.match(/\d+\s+(hour|hours|day|days|minute|minutes)\s+ago/i)
-            );
+            const allLinks = document.querySelectorAll('a');
 
-            publishedElements.forEach(pubElement => {
-                let articleContainer = pubElement.parentElement;
-                let link = null;
-                let depth = 0;
+            const parseRelativeTime = (text) => {
+                if (!text) return null;
+                const now = new Date();
+                const cleanText = text.toLowerCase();
+                const match = cleanText.match(/(\d+)/);
+                if (!match) return null;
+                const num = parseInt(match[0]);
                 
-                while (articleContainer && depth < 5) {
-                    link = articleContainer.querySelector('a[href]');
-                    if (link && link.href && link.href.length > 10) break;
-                    articleContainer = articleContainer.parentElement;
-                    depth++;
+                if (cleanText.includes('דק') || cleanText.includes('min')) {
+                    now.setMinutes(now.getMinutes() - num);
+                } else if (cleanText.includes('שע') || cleanText.includes('hour')) {
+                    now.setHours(now.getHours() - num);
+                } else if (cleanText.includes('יום') || cleanText.includes('ימים') || cleanText.includes('day')) {
+                    now.setDate(now.getDate() - num);
+                } else {
+                    return null;
                 }
+                
+                return now.toISOString();
+            };
 
-                if (!link || !link.href) return;
-                
+            allLinks.forEach(link => {
                 const href = link.href;
-                let title = link.innerText.trim() || link.textContent.trim();
+                let title = link.innerText.trim();
                 
+                if (!href || href.length < 10) return;
                 if (href.includes('euromix.co.il') || href.includes('facebook.com') || 
                     href.includes('twitter.com') || href.includes('whatsapp.com')) return;
                 if (title.length < 10) return;
 
-                const publishedText = pubElement.textContent;
-                const timeMatch = publishedText.match(/(\d+)\s+(hour|hours|day|days|minute|minutes)\s+ago/i);
-                if (!timeMatch) return;
+                let dateStr = null;
+                let container = link.parentElement;
+                let depth = 0;
                 
-                const num = parseInt(timeMatch[1]);
-                const unit = timeMatch[2].toLowerCase();
-                const now = new Date();
-                
-                if (unit.startsWith('minute')) now.setMinutes(now.getMinutes() - num);
-                else if (unit.startsWith('hour')) now.setHours(now.getHours() - num);
-                else if (unit.startsWith('day')) now.setDate(now.getDate() - num);
-                
-                const pubDate = now.toISOString();
+                while (container && !dateStr && depth < 5) {
+                    const text = container.innerText;
+                    if ((text.includes('לפני') || text.includes('ago') || text.includes('Published')) && /\d/.test(text)) {
+                        const lines = text.split('\n');
+                        const timeLine = lines.find(l => 
+                            (l.includes('לפני') || l.includes('ago') || l.includes('Published')) && /\d/.test(l)
+                        );
+                        if (timeLine) dateStr = timeLine;
+                    }
+                    container = container.parentElement;
+                    depth++;
+                }
+
+                const pubDate = parseRelativeTime(dateStr);
+                if (!pubDate) return;
 
                 let img = null;
-                if (articleContainer) {
-                    const foundImg = articleContainer.querySelector('img');
+                container = link.parentElement;
+                depth = 0;
+                
+                while (container && !img && depth < 4) {
+                    const foundImg = container.querySelector('img');
                     if (foundImg) {
                         img = foundImg.src || foundImg.getAttribute('data-src') || foundImg.getAttribute('srcset');
                         if (img && (img.includes('icon') || img.includes('logo') || img.length < 20)) img = null;
                     }
+                    container = container.parentElement;
+                    depth++;
                 }
 
                 let source = "Unknown";
@@ -100,39 +127,55 @@ async function run() {
                 } catch (e) {}
 
                 results.push({
-                    title: title, link: href, source: source, img: img,
-                    pubDate: pubDate, snippet: title
+                    title: title,
+                    link: href,
+                    source: source,
+                    img: img,
+                    pubDate: pubDate,
+                    snippet: title
                 });
             });
 
             return results;
         });
 
-        const uniqueArticles = Array.from(new Map(articles.map(item => [item.link, item])).values());
-        console.log(`Found ${uniqueArticles.length} unique articles with dates`);
+        console.log(`📰 Scraped ${articles.length} articles from page`);
 
+        // סינון ל-24 שעות
         const now = new Date();
         const oneDayAgo = new Date(now.getTime() - (MAX_ARTICLE_AGE_HOURS * 60 * 60 * 1000));
-        const recentArticles = uniqueArticles.filter(article => {
+        const recentArticles = articles.filter(article => {
             const articleDate = new Date(article.pubDate);
             return articleDate >= oneDayAgo && articleDate <= now;
         });
-        
-        console.log(`${recentArticles.length} articles from last 24 hours`);
 
-        if (recentArticles.length > 0) {
-            const articlesToSave = recentArticles.slice(0, MAX_NEW_ARTICLES);
-            await saveToBatches(articlesToSave);
+        console.log(`⏰ ${recentArticles.length} from last 24 hours`);
+
+        // הסר כפילויות
+        const uniqueArticles = Array.from(new Map(recentArticles.map(item => [item.link, item])).values());
+        console.log(`🔗 ${uniqueArticles.length} unique articles`);
+
+        // ✅ סנן רק כתבות חדשות שלא קיימות ב-DB
+        const newArticles = uniqueArticles.filter(article => {
+            const articleId = generateArticleId(article.link);
+            return !existingIds.has(articleId);
+        });
+
+        console.log(`✨ ${newArticles.length} NEW articles (${uniqueArticles.length - newArticles.length} already exist, skipped)`);
+
+        if (newArticles.length > 0) {
+            const articlesToSave = newArticles.slice(0, MAX_NEW_ARTICLES);
+            await saveArticlesBatch(articlesToSave);
         } else {
-            console.log("No new articles to save");
+            console.log("✅ No new articles to save");
         }
 
         await cleanupOldArticles();
         await updateStatusTime();
-        console.log("Done!");
+        console.log("✅ Done!");
 
     } catch (e) {
-        console.error("Error:", e);
+        console.error("❌ Error:", e.message);
         process.exit(1);
     } finally {
         if (browser) await browser.close();
@@ -140,66 +183,98 @@ async function run() {
     }
 }
 
-async function saveToBatches(articles) {
-    const articlesCollection = db.collection('artifacts').doc(APP_ID)
+// ✅ טען את כל ה-IDs הקיימים פעם אחת (חוסך מאות קריאות!)
+async function getExistingArticleIds() {
+    const articlesRef = db.collection('artifacts').doc(APP_ID)
         .collection('public').doc('data').collection('articles');
-    let totalSaved = 0;
+    
+    const snapshot = await articlesRef.select().get(); // רק IDs, לא data מלא!
+    const ids = new Set();
+    
+    snapshot.forEach(doc => {
+        ids.add(doc.id);
+    });
+    
+    return ids;
+}
+
+// ✅ יצירת ID אחיד
+function generateArticleId(link) {
+    return Buffer.from(link)
+        .toString('base64')
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .substring(0, 60);
+}
+
+async function saveArticlesBatch(articles) {
+    console.log(`💾 Saving ${articles.length} NEW articles...`);
+    const articlesRef = db.collection('artifacts').doc(APP_ID)
+        .collection('public').doc('data').collection('articles');
+    
+    let savedCount = 0;
     
     for (let i = 0; i < articles.length; i += FIRESTORE_BATCH_LIMIT) {
         const chunk = articles.slice(i, i + FIRESTORE_BATCH_LIMIT);
         const batch = db.batch();
         
         chunk.forEach(article => {
-            const articleId = Buffer.from(article.link).toString('base64').replace(/[^a-zA-Z0-9]/g, '').substring(0, 60);
-            const docRef = articlesCollection.doc(articleId);
+            const articleId = generateArticleId(article.link);
+            const docRef = articlesRef.doc(articleId);
             
             batch.set(docRef, {
                 ...article,
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                status: 'new', flagged: false, publishedSite: false,
-                publishedSocialHe: false, publishedSocialEn: false,
-                translationComplete: false, assignedTo: null,
-                isCustom: false, hasCountedWriting: false
+                status: 'new',
+                flagged: false,
+                publishedSite: false,
+                publishedSocialHe: false,
+                publishedSocialEn: false,
+                translationComplete: false,
+                assignedTo: null,
+                isCustom: false,
+                hasCountedWriting: false
             }, { merge: true });
         });
         
         await batch.commit();
-        totalSaved += chunk.length;
-        console.log(`Saved ${chunk.length} (total: ${totalSaved}/${articles.length})`);
+        savedCount += chunk.length;
+        console.log(`💾 Batch ${Math.floor(i / FIRESTORE_BATCH_LIMIT) + 1}: ${chunk.length} articles (total: ${savedCount})`);
         
         if (i + FIRESTORE_BATCH_LIMIT < articles.length) {
             await new Promise(resolve => setTimeout(resolve, 100));
         }
     }
-    console.log(`Total saved: ${totalSaved}`);
+    
+    console.log(`✅ Saved ${savedCount} new articles`);
 }
 
 async function cleanupOldArticles() {
-    console.log("Cleaning up...");
+    console.log("🧹 Cleaning articles older than 24h...");
     try {
-        const articlesRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
+        const articlesRef = db.collection('artifacts').doc(APP_ID)
+            .collection('public').doc('data').collection('articles');
+        
         const now = admin.firestore.Timestamp.now();
+        const oneDayAgo = new admin.firestore.Timestamp(
+            now.seconds - (24 * 60 * 60), 
+            now.nanoseconds
+        );
+
+        const oldArticles = await articlesRef
+            .where('createdAt', '<', oneDayAgo)
+            .limit(200)
+            .get();
         
-        const oneDayAgo = new admin.firestore.Timestamp(now.seconds - (MAX_ARTICLE_AGE_HOURS * 60 * 60), now.nanoseconds);
-        const oldNewArticles = await articlesRef.where('status', '==', 'new').where('createdAt', '<', oneDayAgo).limit(200).get();
-        
-        if (!oldNewArticles.empty) {
-            await deleteInBatches(oldNewArticles.docs);
-            console.log(`Deleted ${oldNewArticles.size} old 'new' articles`);
+        if (!oldArticles.empty) {
+            await deleteInBatches(oldArticles.docs);
+            console.log(`🗑️ Deleted ${oldArticles.size} old articles`);
+        } else {
+            console.log("✅ No old articles to delete");
         }
 
-        const fourteenDaysAgo = new admin.firestore.Timestamp(now.seconds - (KEEP_IN_PROGRESS_DAYS * 24 * 60 * 60), now.nanoseconds);
-        const oldInProgressArticles = await articlesRef.where('status', '!=', 'new').where('createdAt', '<', fourteenDaysAgo).limit(100).get();
-        
-        if (!oldInProgressArticles.empty) {
-            await deleteInBatches(oldInProgressArticles.docs);
-            console.log(`Deleted ${oldInProgressArticles.size} old in-progress articles`);
-        }
+        const totalSnapshot = await articlesRef.where('status', '==', 'new').count().get();
+        console.log(`📊 Total 'new' articles: ${totalSnapshot.data().count}`);
 
-        const newArticlesSnapshot = await articlesRef.where('status', '==', 'new').count().get();
-        const totalNewArticles = newArticlesSnapshot.data().count;
-        console.log(`Total 'new' articles: ${totalNewArticles}`);
-        
     } catch (error) {
         console.error("Cleanup error:", error.message);
     }
@@ -228,7 +303,7 @@ async function aggressiveAutoScroll(page) {
                 window.scrollBy(0, distance);
                 totalHeight += distance;
                 count++;
-                if (count > 40 || totalHeight >= document.body.scrollHeight) { 
+                if (count > 40 || totalHeight >= document.body.scrollHeight) {
                     clearInterval(timer);
                     resolve();
                 }
@@ -239,7 +314,8 @@ async function aggressiveAutoScroll(page) {
 
 async function updateStatusTime() {
     try {
-        await db.collection('artifacts').doc(APP_ID).collection('public').doc('data')
+        await db.collection('artifacts').doc(APP_ID)
+            .collection('public').doc('data')
             .collection('settings').doc('status')
             .set({ lastScrape: admin.firestore.Timestamp.now() }, { merge: true });
     } catch(e) {

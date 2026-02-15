@@ -82,9 +82,24 @@ async function run() {
         if (!text) return null;
         const now = new Date();
         const cleanText = text.toLowerCase();
+
+        // Published on 2 days ago / 7 hours ago
+        const relMatch = cleanText.match(/published on\s+(\d+)\s+(day|days|hour|hours)/);
+        if (relMatch) {
+          const num = parseInt(relMatch[1], 10);
+          const unit = relMatch[2];
+          if (unit.startsWith('day')) {
+            now.setDate(now.getDate() - num);
+          } else if (unit.startsWith('hour')) {
+            now.setHours(now.getHours() - num);
+          }
+          return now.toISOString();
+        }
+
+        // תמיכה קיימת בעברית/אנגלית יחסית (לפני X דק/שע/יום)
         const match = cleanText.match(/(\d+)/);
         if (!match) return null;
-        const num = parseInt(match[0]);
+        const num = parseInt(match[0], 10);
 
         if (cleanText.includes('דק') || cleanText.includes('min')) {
           now.setMinutes(now.getMinutes() - num);
@@ -114,10 +129,10 @@ async function run() {
 
         while (container && !dateStr && depth < 5) {
           const text = container.innerText;
-          if ((text.includes('לפני') || text.includes('ago') || text.includes('Published')) && /\d/.test(text)) {
+          if ((text.includes('לפני') || text.toLowerCase().includes('published on') || text.includes('ago')) && /\d/.test(text)) {
             const lines = text.split('\n');
             const timeLine = lines.find(l =>
-              (l.includes('לפני') || l.includes('ago') || l.includes('Published')) && /\d/.test(l)
+              (l.includes('לפני') || l.toLowerCase().includes('published on') || l.includes('ago')) && /\d/.test(l)
             );
             if (timeLine) dateStr = timeLine;
           }
@@ -205,6 +220,7 @@ async function run() {
   }
 }
 
+// ✅ טען את כל ה-IDs הקיימים פעם אחת (חוסך מאות קריאות!)
 async function getExistingArticleIds() {
   const articlesRef = db.collection('artifacts').doc(APP_ID)
     .collection('public').doc('data').collection('articles');
@@ -219,6 +235,7 @@ async function getExistingArticleIds() {
   return ids;
 }
 
+// ✅ יצירת ID אחיד
 function generateArticleId(link) {
   return Buffer.from(link)
     .toString('base64')

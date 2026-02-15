@@ -286,8 +286,10 @@ async function saveArticlesBatch(articles) {
 }
 
 async function cleanupOldArticles() {
-  console.log("🧹 Cleaning articles older than 24h...");
-  try {
+  console.log("🛑 Cleanup DISABLED - protecting active tasks");
+  return;
+}
+
     const articlesRef = db.collection('artifacts').doc(APP_ID)
       .collection('public').doc('data').collection('articles');
 

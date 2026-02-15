@@ -4,7 +4,7 @@ const puppeteer = require("puppeteer");
 function initFirebase() {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
     if (!serviceAccountRaw) {
-        console.error("❌ שגיאה: FIREBASE_SERVICE_ACCOUNT חסר.");
+        console.error("❌ FIREBASE_SERVICE_ACCOUNT missing");
         process.exit(1);
     }
     try {
@@ -14,7 +14,7 @@ function initFirebase() {
         }
         return admin.firestore();
     } catch (error) {
-        console.error("❌ שגיאה בפענוח מפתח:", error.message);
+        console.error("❌ Error parsing key:", error.message);
         process.exit(1);
     }
 }
@@ -28,7 +28,7 @@ const KEEP_IN_PROGRESS_DAYS = 14;
 const FIRESTORE_BATCH_LIMIT = 500;
 
 async function run() {
-    console.log("🚀 מתחיל ריצה...");
+    console.log("🔥 NEW VERSION RUNNING!");
     let browser;
     try {
         browser = await puppeteer.launch({ 
@@ -48,8 +48,6 @@ async function run() {
                 el.textContent.includes('Published on') && 
                 el.textContent.match(/\d+\s+(hour|hours|day|days|minute|minutes)\s+ago/i)
             );
-
-            console.log(`Found ${publishedElements.length} elements with "Published on"`);
 
             publishedElements.forEach(pubElement => {
                 let articleContainer = pubElement.parentElement;
@@ -103,8 +101,7 @@ async function run() {
 
                 results.push({
                     title: title, link: href, source: source, img: img,
-                    pubDate: pubDate, publishedText: publishedText.trim().substring(0, 50),
-                    snippet: title
+                    pubDate: pubDate, snippet: title
                 });
             });
 
@@ -112,16 +109,7 @@ async function run() {
         });
 
         const uniqueArticles = Array.from(new Map(articles.map(item => [item.link, item])).values());
-        console.log(`🔎 נמצאו ${uniqueArticles.length} כתבות ייחודיות עם תאריך.`);
-
-        if (uniqueArticles.length > 0) {
-            console.log(`📝 דוגמאות (3 ראשונות):`, 
-                uniqueArticles.slice(0, 3).map(a => ({
-                    title: a.title.substring(0, 40),
-                    published: a.publishedText
-                }))
-            );
-        }
+        console.log(`Found ${uniqueArticles.length} unique articles with dates`);
 
         const now = new Date();
         const oneDayAgo = new Date(now.getTime() - (MAX_ARTICLE_AGE_HOURS * 60 * 60 * 1000));
@@ -130,24 +118,21 @@ async function run() {
             return articleDate >= oneDayAgo && articleDate <= now;
         });
         
-        console.log(`⏰ ${recentArticles.length} כתבות מ-${MAX_ARTICLE_AGE_HOURS} שעות אחרונות.`);
+        console.log(`${recentArticles.length} articles from last 24 hours`);
 
         if (recentArticles.length > 0) {
             const articlesToSave = recentArticles.slice(0, MAX_NEW_ARTICLES);
-            if (articlesToSave.length < recentArticles.length) {
-                console.log(`⚠️ מגביל ל-${MAX_NEW_ARTICLES} כתבות.`);
-            }
             await saveToBatches(articlesToSave);
         } else {
-            console.log("👌 אין כתבות חדשות לשמירה.");
+            console.log("No new articles to save");
         }
 
         await cleanupOldArticles();
         await updateStatusTime();
-        console.log("🎉 ריצה הסתיימה בהצלחה.");
+        console.log("Done!");
 
     } catch (e) {
-        console.error("❌ שגיאה בריצה:", e);
+        console.error("Error:", e);
         process.exit(1);
     } finally {
         if (browser) await browser.close();
@@ -167,10 +152,9 @@ async function saveToBatches(articles) {
         chunk.forEach(article => {
             const articleId = Buffer.from(article.link).toString('base64').replace(/[^a-zA-Z0-9]/g, '').substring(0, 60);
             const docRef = articlesCollection.doc(articleId);
-            const { publishedText, ...articleData } = article;
             
             batch.set(docRef, {
-                ...articleData,
+                ...article,
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
                 status: 'new', flagged: false, publishedSite: false,
                 publishedSocialHe: false, publishedSocialEn: false,
@@ -180,4 +164,87 @@ async function saveToBatches(articles) {
         });
         
         await batch.commit();
-        totalSaved += c
+        totalSaved += chunk.length;
+        console.log(`Saved ${chunk.length} (total: ${totalSaved}/${articles.length})`);
+        
+        if (i + FIRESTORE_BATCH_LIMIT < articles.length) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+    }
+    console.log(`Total saved: ${totalSaved}`);
+}
+
+async function cleanupOldArticles() {
+    console.log("Cleaning up...");
+    try {
+        const articlesRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
+        const now = admin.firestore.Timestamp.now();
+        
+        const oneDayAgo = new admin.firestore.Timestamp(now.seconds - (MAX_ARTICLE_AGE_HOURS * 60 * 60), now.nanoseconds);
+        const oldNewArticles = await articlesRef.where('status', '==', 'new').where('createdAt', '<', oneDayAgo).limit(200).get();
+        
+        if (!oldNewArticles.empty) {
+            await deleteInBatches(oldNewArticles.docs);
+            console.log(`Deleted ${oldNewArticles.size} old 'new' articles`);
+        }
+
+        const fourteenDaysAgo = new admin.firestore.Timestamp(now.seconds - (KEEP_IN_PROGRESS_DAYS * 24 * 60 * 60), now.nanoseconds);
+        const oldInProgressArticles = await articlesRef.where('status', '!=', 'new').where('createdAt', '<', fourteenDaysAgo).limit(100).get();
+        
+        if (!oldInProgressArticles.empty) {
+            await deleteInBatches(oldInProgressArticles.docs);
+            console.log(`Deleted ${oldInProgressArticles.size} old in-progress articles`);
+        }
+
+        const newArticlesSnapshot = await articlesRef.where('status', '==', 'new').count().get();
+        const totalNewArticles = newArticlesSnapshot.data().count;
+        console.log(`Total 'new' articles: ${totalNewArticles}`);
+        
+    } catch (error) {
+        console.error("Cleanup error:", error.message);
+    }
+}
+
+async function deleteInBatches(docs) {
+    for (let i = 0; i < docs.length; i += FIRESTORE_BATCH_LIMIT) {
+        const chunk = docs.slice(i, i + FIRESTORE_BATCH_LIMIT);
+        const batch = db.batch();
+        chunk.forEach(doc => batch.delete(doc.ref));
+        await batch.commit();
+        
+        if (i + FIRESTORE_BATCH_LIMIT < docs.length) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+    }
+}
+
+async function aggressiveAutoScroll(page) {
+    await page.evaluate(async () => {
+        await new Promise((resolve) => {
+            let totalHeight = 0;
+            let distance = 100;
+            let count = 0;
+            const timer = setInterval(() => {
+                window.scrollBy(0, distance);
+                totalHeight += distance;
+                count++;
+                if (count > 40 || totalHeight >= document.body.scrollHeight) { 
+                    clearInterval(timer);
+                    resolve();
+                }
+            }, 50);
+        });
+    });
+}
+
+async function updateStatusTime() {
+    try {
+        await db.collection('artifacts').doc(APP_ID).collection('public').doc('data')
+            .collection('settings').doc('status')
+            .set({ lastScrape: admin.firestore.Timestamp.now() }, { merge: true });
+    } catch(e) {
+        console.error("Status update error:", e.message);
+    }
+}
+
+run();

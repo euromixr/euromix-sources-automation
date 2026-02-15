@@ -4,9 +4,9 @@ const puppeteer = require("puppeteer");
 // === הגדרות ===
 const APP_ID = 'euromix-pro-v4-wp';
 const TARGET_URL = "https://www.euromix.co.il/a123/";
-const MAX_ARTICLE_AGE_HOURS = 24;      // רק 24 שעות אחרונות
-const KEEP_NEW_LIMIT = 300;             // מקסימום new
-const KEEP_WORK_DAYS = 30;              // עבודה עד 30 יום
+const MAX_ARTICLE_AGE_HOURS = 24;      
+const KEEP_NEW_LIMIT = 300;             
+const KEEP_WORK_DAYS = 30;              
 
 // --- 1. אתחול מאובטח ---
 function initFirebase() {
@@ -47,7 +47,7 @@ async function run() {
         await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 180000 });
         await aggressiveAutoScroll(page);
 
-        // --- חילוץ כתבות ---
+        // --- חילוץ כתבות (תמיכה מורחבת בזמנים) ---
         const articles = await page.evaluate(() => {
             const results = [];
             const allLinks = document.querySelectorAll('a');
@@ -56,12 +56,18 @@ async function run() {
                 if (!text) return new Date().toISOString();
                 const now = new Date();
                 const cleanText = text.toLowerCase();
-                const match = cleanText.match(/(\\d+)/);
-                if (!match) return now.toISOString();
-                const num = parseInt(match[0]);
+                
+                // תמיכה מלאה: published/לפני/ago + מספרים
+                const timeMatch = cleanText.match(/(\d+)\s*(דקות?|שעות?|דק|שע|min|mins?|hour|hours?|day|days?|יום|ימים|לפני|ago|published)/i);
+                if (!timeMatch) return now.toISOString();
+                
+                const [_, numStr] = timeMatch;
+                const num = parseInt(numStr);
+                
                 if (cleanText.includes('דק') || cleanText.includes('min')) now.setMinutes(now.getMinutes() - num);
                 else if (cleanText.includes('שע') || cleanText.includes('hour')) now.setHours(now.getHours() - num);
-                else if (cleanText.includes('יום') || cleanText.includes('ימים') || cleanText.includes('day')) now.setDate(now.getDate() - num);
+                else if (cleanText.includes('יום') || cleanText.includes('day')) now.setDate(now.getDate() - num);
+                
                 return now.toISOString();
             };
 
@@ -74,15 +80,15 @@ async function run() {
                     href.includes('twitter.com') || href.includes('whatsapp.com')) return;
                 if (title.length < 10) return;
 
-                // חילוץ תאריך
+                // חילוץ תאריך משופר
                 let dateStr = null;
                 let container = link.parentElement;
                 let depth = 0;
-                while (container && !dateStr && depth < 3) {
-                    if ((container.innerText.includes('לפני') || container.innerText.includes('ago')) && /\d/.test(container.innerText)) {
-                        const lines = container.innerText.split('\n');
-                        const timeLine = lines.find(l => (l.includes('לפני') || l.includes('ago')) && /\d/.test(l));
-                        if (timeLine) dateStr = timeLine;
+                while (container && !dateStr && depth < 5) {
+                    const text = container.innerText;
+                    if ((text.includes('לפני') || text.includes('ago') || text.includes('published')) && /\d/.test(text)) {
+                        const lines = text.split('\n');
+                        dateStr = lines.find(l => /\d/.test(l) && (l.includes('לפני') || l.includes('ago') || l.includes('published')));
                     }
                     container = container.parentElement;
                     depth++;
@@ -134,7 +140,6 @@ async function run() {
         if (newArticles.length > 0) {
             const batch = db.batch();
             newArticles.forEach(article => {
-                // ID ייחודי מהקישור
                 const articleId = Buffer.from(article.link).toString('base64').replace(/[^a-zA-Z0-9]/g, '').substring(0, 60);
                 const docRef = articlesCollection.doc(articleId);
                 
@@ -156,6 +161,24 @@ async function run() {
             console.log(`💾 נשמרו ${newArticles.length} כתבות חדשות.`);
         }
 
+        // --- ניקוי כפוי של new >48h (למרות index) ---
+        console.log("🧹 ניקוי כפוי new >48h...");
+        const forceCleanup = await articlesCollection.where('status', '==', 'new').get();
+        const docsToDelete = [];
+        forceCleanup.docs.forEach(doc => {
+            const data = doc.data();
+            const createdDate = data.createdAt ? data.createdAt.toDate() : new Date(0);
+            const ageHours = (Date.now() - createdDate) / (3600*1000);
+            if (ageHours > 48) docsToDelete.push(doc.ref);
+        });
+
+        if (docsToDelete.length > 0) {
+            const batch = db.batch();
+            docsToDelete.forEach(ref => batch.delete(ref));
+            await batch.commit();
+            console.log(`🗑️ נוקה ${docsToDelete.length} new >48h.`);
+        }
+
         // --- ניקוי חכם ---
         await cleanupSmart();
 
@@ -171,7 +194,7 @@ async function run() {
     }
 }
 
-// === ניקוי חכם: new + עבודה ===
+// === ניקוי חכם ===
 async function cleanupSmart() {
     console.log("🧹 ניקוי חכם...");
     try {
@@ -180,18 +203,7 @@ async function cleanupSmart() {
         
         const now = admin.firestore.Timestamp.now();
 
-        // 1. new ישנות (24h)
-        const oldNew = await articlesRef.where('status', '==', 'new')
-            .where('createdAt', '<', new admin.firestore.Timestamp(now.seconds - MAX_ARTICLE_AGE_HOURS*3600, 0))
-            .limit(200).get();
-        if (!oldNew.empty) {
-            const batch = db.batch();
-            oldNew.docs.forEach(doc => batch.delete(doc.ref));
-            await batch.commit();
-            console.log(`🗑️ נמחקו ${oldNew.size} new ישנות.`);
-        }
-
-        // 2. עבודה ישנות (30 יום)
+        // עבודה >30 יום
         const oldWork = await articlesRef.where('status', '!=', 'new')
             .where('createdAt', '<', new admin.firestore.Timestamp(now.seconds - KEEP_WORK_DAYS*86400, 0))
             .limit(100).get();
@@ -199,18 +211,18 @@ async function cleanupSmart() {
             const batch = db.batch();
             oldWork.docs.forEach(doc => batch.delete(doc.ref));
             await batch.commit();
-            console.log(`🗑️ נמחקו ${oldWork.size} עבודה ישנות.`);
+            console.log(`🗑️ נמחקו ${oldWork.size} עבודה >30 יום.`);
         }
 
-        // 3. מגבלה על new
-        const newCount = await articlesRef.where('status', '==', 'new').count().get();
-        if (newCount.data().count > KEEP_NEW_LIMIT) {
+        // מגבלה על new
+        const newCountSnap = await articlesRef.where('status', '==', 'new').count().get();
+        if (newCountSnap.data().count > KEEP_NEW_LIMIT) {
             const excess = await articlesRef.where('status', '==', 'new')
-                .orderBy('createdAt').limit(newCount.data().count - KEEP_NEW_LIMIT + 10).get();
+                .orderBy('createdAt').limit(newCountSnap.data().count - KEEP_NEW_LIMIT + 10).get();
             const batch = db.batch();
             excess.docs.forEach(doc => batch.delete(doc.ref));
             await batch.commit();
-            console.log(`🗑️ נמחקו עוד ${excess.size} new עודפות.`);
+            console.log(`🗑️ נמחקו ${excess.size} new עודפות.`);
         }
 
     } catch (error) {

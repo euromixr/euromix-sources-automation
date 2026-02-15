@@ -1,5 +1,7 @@
 const admin = require("firebase-admin");
-const puppeteer = require("puppeteer");
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
 
 function initFirebase() {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -27,17 +29,34 @@ const MAX_NEW_ARTICLES = 300;
 const FIRESTORE_BATCH_LIMIT = 500;
 
 async function run() {
-    console.log("🔥 Running - 24h articles only, skip existing!");
-    let browser;
+console.log("🔥 Running - 24h articles only, skip existing!");
+let browser;
+
+try {
+    browser = await puppeteer.launch({ 
+        headless: "new",
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox', 
+            '--disable-dev-shm-usage', 
+            '--disable-accelerated-2d-canvas', 
+            '--disable-gpu', 
+            '--single-process',
+            '--disable-blink-features=AutomationControlled'
+        ] 
+    });
     
-    try {
-        browser = await puppeteer.launch({ 
-            headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--disable-gpu', '--single-process'] 
-        });
-        
-        const page = await browser.newPage();
-        await updateStatusTime();
+    const page = await browser.newPage();
+    
+    // ✅ הוסף user agent וכותרות
+    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({
+        'Accept-Language': 'he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+    });
+    
+    await updateStatusTime();
+
         
         // ✅ טען את כל ה-IDs הקיימים פעם אחת בלבד!
         console.log("🔍 Loading existing article IDs...");

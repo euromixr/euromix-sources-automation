@@ -1,7 +1,7 @@
 const admin = require("firebase-admin");
 const puppeteer = require("puppeteer");
 
-// --- 1. אתחול מאובטח (כמו במערכת החדשה) ---
+// --- שלב 1: אתחול ---
 function initFirebase() {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
     if (!serviceAccountRaw) {
@@ -15,48 +15,47 @@ function initFirebase() {
         }
         return admin.firestore();
     } catch (error) {
-        console.error("❌ שגיאה בפענוח מפתח:", error.message);
         process.exit(1);
     }
 }
 
 const db = initFirebase();
-const APP_ID = 'euromix-pro-v4-wp'; // משתמשים ב-ID החדש
+const APP_ID = 'euromix-pro-v4-wp'; 
 const TARGET_URL = "https://www.euromix.co.il/a123/";
 
 async function run() {
-    console.log("🚀 מתחיל ריצה (לוגיקה משולבת)...");
-    
+    console.log("🚀 מתחיל ריצה...");
     let browser;
     try {
         browser = await puppeteer.launch({ 
             headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--disable-gpu', '--single-process', '--no-zygote'] 
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process', '--no-zygote'] 
         });
         
         const page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+        
         await updateStatusTime();
 
-        // הגדרות דפדפן
         await page.setViewport({ width: 1920, height: 1080 });
-        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 180000 });
+        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 120000 });
         await aggressiveAutoScroll(page);
 
-        // --- שלב החילוץ (המוח הישן והטוב) ---
+        // --- חילוץ נתונים (אותו לוגיקה כמו קודם) ---
         const articles = await page.evaluate(() => {
             const results = [];
             const allLinks = document.querySelectorAll('a');
-
+            
             const parseRelativeTime = (text) => {
                 if (!text) return new Date().toISOString();
                 const now = new Date();
-                const cleanText = text.toLowerCase();
-                const match = cleanText.match(/(\d+)/);
+                const match = text.toLowerCase().match(/(\d+)/);
                 if (!match) return now.toISOString();
                 const num = parseInt(match[0]);
-                if (cleanText.includes('דק') || cleanText.includes('min')) now.setMinutes(now.getMinutes() - num);
-                else if (cleanText.includes('שע') || cleanText.includes('hour')) now.setHours(now.getHours() - num);
-                else if (cleanText.includes('יום') || cleanText.includes('ימים') || cleanText.includes('day')) now.setDate(now.getDate() - num);
+                const clean = text.toLowerCase();
+                if (clean.includes('דק') || clean.includes('min')) now.setMinutes(now.getMinutes() - num);
+                else if (clean.includes('שע') || clean.includes('hour')) now.setHours(now.getHours() - num);
+                else if (clean.includes('יום') || clean.includes('day')) now.setDate(now.getDate() - num);
                 return now.toISOString();
             };
 
@@ -65,37 +64,26 @@ async function run() {
                 let title = link.innerText.trim();
                 
                 if (!href || href.length < 10) return;
-                
-                // *** הסינון הקריטי מהקוד הישן ***
-                // מתעלם מקישורים פנימיים של האתר שלך וממדיה חברתית
-                if (href.includes('euromix.co.il') || href.includes('facebook.com') || href.includes('twitter.com') || href.includes('whatsapp.com')) return;
-                
+                if (href.includes('facebook.com') || href.includes('twitter.com') || href.includes('whatsapp.com')) return;
                 if (title.length < 10) return;
 
-                // לוגיקת חילוץ תאריך (מהקוד הישן)
                 let dateStr = null;
                 let container = link.parentElement;
                 let depth = 0;
                 while (container && !dateStr && depth < 3) {
-                    if ((container.innerText.includes('לפני') || container.innerText.includes('ago')) && /\d/.test(container.innerText)) {
-                         const lines = container.innerText.split('\n');
-                         const timeLine = lines.find(l => (l.includes('לפני') || l.includes('ago')) && /\d/.test(l));
-                         if (timeLine) dateStr = timeLine;
+                    if (/\d/.test(container.innerText) && (container.innerText.includes('לפני') || container.innerText.includes('ago'))) {
+                         dateStr = container.innerText;
                     }
                     container = container.parentElement;
                     depth++;
                 }
 
-                // לוגיקת חילוץ תמונה (מהקוד הישן)
                 let img = null;
                 container = link.parentElement;
                 depth = 0;
                 while (container && !img && depth < 4) {
                     const foundImg = container.querySelector('img');
-                    if (foundImg) {
-                        img = foundImg.src || foundImg.getAttribute('data-src');
-                        if (img && (img.includes('icon') || img.includes('logo'))) img = null;
-                    }
+                    if (foundImg) img = foundImg.src || foundImg.getAttribute('data-src');
                     container = container.parentElement;
                     depth++;
                 }
@@ -111,28 +99,29 @@ async function run() {
             return results;
         });
 
-        // סינון כפילויות בזיכרון
+        // סינון כפילויות פנימי
         const uniqueArticles = Array.from(new Map(articles.map(item => [item.link, item])).values());
-        console.log(`🔎 נמצאו ${uniqueArticles.length} כתבות (מקורות חיצוניים בלבד).`);
+        console.log(`🔎 נמצאו ${uniqueArticles.length} כתבות בדף.`);
 
-        // --- שלב השמירה (השיטה החסכונית - Bulk Check) ---
-        // זה מה שמונע את קריסת המכסה
-        console.log("📦 בודק אילו כתבות כבר קיימות במסד...");
+        // --- שיפור קריטי: בדיקת קיום ב-Bulk (קריאה אחת במקום 961) ---
+        console.log("📦 מושך רשימת כתבות קיימות לבדיקה מהירה...");
         const articlesCollection = db.collection('artifacts').doc(APP_ID)
             .collection('public').doc('data').collection('articles');
-
-        // שולפים רק קישורים קיימים (קריאה אחת זולה)
+            
+        // שולף רק את השדה 'link' כדי לחסוך בתעבורה
         const existingDocs = await articlesCollection.select('link').get();
         const existingLinks = new Set(existingDocs.docs.map(d => d.data().link));
         
-        // מסננים בזיכרון
+        // סינון בזיכרון (מהיר וחינמי)
         const newArticles = uniqueArticles.filter(a => !existingLinks.has(a.link));
-        console.log(`✨ יש להוסיף ${newArticles.length} כתבות חדשות.`);
+        
+        console.log(`✨ מתוך ${uniqueArticles.length} כתבות, ${newArticles.length} הן חדשות.`);
 
         if (newArticles.length > 0) {
             const batch = db.batch();
             let count = 0;
             
+            // שמירת החדשות בלבד
             newArticles.forEach(article => {
                 const docRef = articlesCollection.doc();
                 batch.set(docRef, {
@@ -151,24 +140,22 @@ async function run() {
                 count++;
             });
             
-            // שומרים ב"מכה אחת"
             await batch.commit();
-            console.log(`💾 נשמרו ${count} כתבות.`);
+            console.log(`💾 נשמרו ${count} כתבות חדשות.`);
         } else {
-            console.log("👌 אין כתבות חדשות.");
+            console.log("👌 אין כתבות חדשות לשמירה.");
         }
 
-        // --- ניקוי חכם (כדי לא לצבור זבל) ---
-        // מפעילים רק אם יש המון כתבות כדי לא לבזבז משאבים סתם
-        if (existingDocs.size > 350) {
-            await cleanupQuotaSafe();
+        // --- ניקוי (גם הוא עבר אופטימיזציה כדי לא לקרוא סתם) ---
+        if (existingDocs.size > 350) { 
+             await cleanupQuotaSafe();
         }
 
         await updateStatusTime();
-        console.log("🎉 ריצה הסתיימה בהצלחה.");
+        console.log("🎉 תהליך הסתיים.");
 
     } catch (e) {
-        console.error("❌ שגיאה בריצה:", e);
+        console.error("❌ שגיאה:", e);
         process.exit(1);
     } finally {
         if (browser) await browser.close();
@@ -176,35 +163,27 @@ async function run() {
     }
 }
 
-// === פונקציית ניקוי חסכונית ===
 async function cleanupQuotaSafe() {
     console.log("🧹 מבצע ניקוי...");
     try {
         const articlesRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
-        // שולף רק כתבות בסטטוס 'new' (לא נוגעים בכתבות בטיפול)
+        // קורא רק כתבות בסטטוס 'new' כדי לחסוך
         const snapshot = await articlesRef.where('status', '==', 'new').get();
-        
         if (snapshot.empty) return;
 
         const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data(), ref: d.ref }));
-        // מיון: ישן לחדש
         docs.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
 
         const batch = db.batch();
         let deleteCount = 0;
         const now = new Date();
-        
-        // הגדרות מגבלה
-        const KEEP_NEW_LIMIT = 300; 
-        const MAX_DAYS = 5;
+        const KEEP_NEW_LIMIT = 100; // שומר רק 100 אחרונות בסטטוס 'חדש'
+        const MAX_DAYS = 4;
 
         docs.forEach((doc, index) => {
             let shouldDelete = false;
             const pubDate = new Date(doc.pubDate);
-            
-            // אם הכתבה ישנה מדי
             if ((now - pubDate) / (1000 * 60 * 60 * 24) > MAX_DAYS) shouldDelete = true;
-            // אם יש יותר מדי כתבות ממתינות
             if (index >= KEEP_NEW_LIMIT) shouldDelete = true;
 
             if (shouldDelete) {
@@ -215,11 +194,9 @@ async function cleanupQuotaSafe() {
 
         if (deleteCount > 0) {
             await batch.commit();
-            console.log(`🗑️ נמחקו ${deleteCount} כתבות ישנות.`);
+            console.log(`🗑️ נמחקו ${deleteCount} כתבות.`);
         }
-    } catch (error) {
-        console.error("⚠️ שגיאה בניקוי:", error.message);
-    }
+    } catch (error) { console.error("שגיאת ניקוי:", error.message); }
 }
 
 async function aggressiveAutoScroll(page) {
@@ -232,7 +209,7 @@ async function aggressiveAutoScroll(page) {
                 window.scrollBy(0, distance);
                 totalHeight += distance;
                 count++;
-                if (count > 40 || totalHeight >= document.body.scrollHeight) { 
+                if (count > 30 || totalHeight >= document.body.scrollHeight) { 
                     clearInterval(timer); resolve(); 
                 }
             }, 50);

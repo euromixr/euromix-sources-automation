@@ -72,16 +72,16 @@ async function run() {
             timeout: 120000 
         });
 
-        // ✅ המתנה ל-Cloudflare
+        // ✅ המתנה ל-Cloudflare (תיקון!)
         console.log("⏳ ממתין ל-Cloudflare...");
-        await page.waitForTimeout(8000);
+        await new Promise(resolve => setTimeout(resolve, 8000));
         
         const title = await page.title();
         console.log("📄 כותרת העמוד:", title);
         
         if (title.includes("Just a moment") || title.includes("Cloudflare")) {
             console.log("⚠️ עדיין ב-Cloudflare, ממתין עוד...");
-            await page.waitForTimeout(10000);
+            await new Promise(resolve => setTimeout(resolve, 10000));
         }
         
         const bodyText = await page.evaluate(() => document.body.innerText);

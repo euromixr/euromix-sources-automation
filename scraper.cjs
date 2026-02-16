@@ -1,5 +1,9 @@
 const admin = require("firebase-admin");
-const puppeteer = require("puppeteer");
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+
+// ✅ הפעל Stealth
+puppeteer.use(StealthPlugin());
 
 const APP_ID = 'euromix-pro-v4-wp';
 const TARGET_URL = "https://www.euromix.co.il/a123/";
@@ -33,38 +37,55 @@ async function run() {
     
     let browser;
     try {
-        console.log("🌐 מפעיל דפדפן...");
+        console.log("🌐 מפעיל דפדפן stealth...");
         browser = await puppeteer.launch({ 
             headless: "new",
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--disable-gpu',
                 '--disable-blink-features=AutomationControlled',
-                '--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                '--disable-features=IsolateOrigins,site-per-process'
             ],
             timeout: 30000
         });
         console.log("✅ דפדפן פעיל!");
         
         const page = await browser.newPage();
-        await page.setDefaultTimeout(60000);
+        await page.setDefaultTimeout(120000);
+        
+        // ✅ User agent אמיתי
+        await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'he-IL,he;q=0.9,en-US;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        });
+        
         await updateStatusTime();
 
         console.log(`🔗 טוען ${TARGET_URL}...`);
         await page.setViewport({ width: 1920, height: 1080 });
         
         await page.goto(TARGET_URL, { 
-            waitUntil: 'domcontentloaded',
-            timeout: 90000 
+            waitUntil: 'networkidle0',
+            timeout: 120000 
         });
 
-        // ✅ DEBUG - בודק אם יש חסימה
-        console.log("📄 כותרת העמוד:", await page.title());
+        // ✅ המתנה ל-Cloudflare
+        console.log("⏳ ממתין ל-Cloudflare...");
+        await page.waitForTimeout(8000);
+        
+        const title = await page.title();
+        console.log("📄 כותרת העמוד:", title);
+        
+        if (title.includes("Just a moment") || title.includes("Cloudflare")) {
+            console.log("⚠️ עדיין ב-Cloudflare, ממתין עוד...");
+            await page.waitForTimeout(10000);
+        }
+        
         const bodyText = await page.evaluate(() => document.body.innerText);
-        console.log("📝 תוכן העמוד (100 תווים ראשונים):", bodyText.substring(0, 100));
+        console.log("📝 תוכן העמוד (200 תווים):", bodyText.substring(0, 200));
         
         console.log("✅ העמוד נטען!");
 

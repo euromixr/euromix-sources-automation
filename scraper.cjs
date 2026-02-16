@@ -33,19 +33,40 @@ async function run() {
     
     let browser;
     try {
+        console.log("🌐 מפעיל דפדפן...");
         browser = await puppeteer.launch({ 
             headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', 
-                   '--disable-accelerated-2d-canvas', '--disable-gpu', '--single-process', '--no-zygote'] 
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--disable-extensions',
+                '--single-process',
+                '--no-zygote'
+            ],
+            timeout: 30000
         });
+        console.log("✅ דפדפן פעיל!");
         
         const page = await browser.newPage();
+        await page.setDefaultTimeout(60000);
         await updateStatusTime();
 
+        console.log(`🔗 טוען ${TARGET_URL}...`);
         await page.setViewport({ width: 1920, height: 1080 });
-        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 180000 });
-        await aggressiveAutoScroll(page);
+        await page.goto(TARGET_URL, { 
+            waitUntil: 'domcontentloaded',  // ← שינוי! פחות קפדני
+            timeout: 90000 
+        });
+        console.log("✅ העמוד נטען!");
 
+        await aggressiveAutoScroll(page);
+        console.log("✅ גלילה הושלמה!");
+
+        console.log("🔍 מחלץ כתבות...");
         const articles = await page.evaluate(() => {
             const results = [];
             const allLinks = document.querySelectorAll('a');
@@ -108,6 +129,7 @@ async function run() {
             });
             return results;
         });
+        console.log(`✅ נמצאו ${articles.length} לינקים גולמיים!`);
 
         const uniqueArticles = Array.from(new Map(articles.map(item => [item.link, item])).values());
         
@@ -127,6 +149,7 @@ async function run() {
         const existingLinks = new Set();
         let totalReads = 0;
 
+        console.log(`🔍 בודק ${linksToCheck.length} לינקים...`);
         for (let i = 0; i < linksToCheck.length; i += 10) {
             const batch = linksToCheck.slice(i, i + 10);
             const snapshot = await articlesCollection
@@ -169,11 +192,15 @@ async function run() {
         console.log("🎉 ריצה הסתיימה בהצלחה!");
 
     } catch (e) {
-        console.error("❌ שגיאה:", e);
+        console.error("❌ שגיאה בריצה:", e.message);
+        console.error("Stack:", e.stack);
         process.exit(1);
     } finally {
-        if (browser) await browser.close();
-        setTimeout(() => process.exit(0), 1000);
+        if (browser) {
+            console.log("🔒 סוגר דפדפן...");
+            await browser.close();
+        }
+        setTimeout(() => process.exit(0), 2000);
     }
 }
 

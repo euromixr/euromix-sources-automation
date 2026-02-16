@@ -1,14 +1,13 @@
 const admin = require("firebase-admin");
 const puppeteer = require("puppeteer");
 
-// === הגדרות ===
 const APP_ID = 'euromix-pro-v4-wp';
 const TARGET_URL = "https://www.euromix.co.il/a123/";
-const MAX_ARTICLE_AGE_HOURS = 24;      
-const KEEP_NEW_LIMIT = 300;             
-const KEEP_WORK_DAYS = 30;              
+const MAX_AGE_HOURS = 48;
+const KEEP_NEW_LIMIT = 300;
+const MAX_NEW_DAYS = 2;
+const KEEP_WORK_DAYS = 30;
 
-// --- 1. אתחול מאובטח ---
 function initFirebase() {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
     if (!serviceAccountRaw) {
@@ -47,7 +46,6 @@ async function run() {
         await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 180000 });
         await aggressiveAutoScroll(page);
 
-        // --- חילוץ כתבות (תמיכה מורחבת בזמנים) ---
         const articles = await page.evaluate(() => {
             const results = [];
             const allLinks = document.querySelectorAll('a');
@@ -56,18 +54,12 @@ async function run() {
                 if (!text) return new Date().toISOString();
                 const now = new Date();
                 const cleanText = text.toLowerCase();
-                
-                // תמיכה מלאה: published/לפני/ago + מספרים
-                const timeMatch = cleanText.match(/(\d+)\s*(דקות?|שעות?|דק|שע|min|mins?|hour|hours?|day|days?|יום|ימים|לפני|ago|published)/i);
-                if (!timeMatch) return now.toISOString();
-                
-                const [_, numStr] = timeMatch;
-                const num = parseInt(numStr);
-                
+                const match = cleanText.match(/(\d+)/);
+                if (!match) return now.toISOString();
+                const num = parseInt(match[0]);
                 if (cleanText.includes('דק') || cleanText.includes('min')) now.setMinutes(now.getMinutes() - num);
                 else if (cleanText.includes('שע') || cleanText.includes('hour')) now.setHours(now.getHours() - num);
-                else if (cleanText.includes('יום') || cleanText.includes('day')) now.setDate(now.getDate() - num);
-                
+                else if (cleanText.includes('יום') || cleanText.includes('ימים') || cleanText.includes('day')) now.setDate(now.getDate() - num);
                 return now.toISOString();
             };
 
@@ -80,21 +72,19 @@ async function run() {
                     href.includes('twitter.com') || href.includes('whatsapp.com')) return;
                 if (title.length < 10) return;
 
-                // חילוץ תאריך משופר
                 let dateStr = null;
                 let container = link.parentElement;
                 let depth = 0;
-                while (container && !dateStr && depth < 5) {
-                    const text = container.innerText;
-                    if ((text.includes('לפני') || text.includes('ago') || text.includes('published')) && /\d/.test(text)) {
-                        const lines = text.split('\n');
-                        dateStr = lines.find(l => /\d/.test(l) && (l.includes('לפני') || l.includes('ago') || l.includes('published')));
+                while (container && !dateStr && depth < 3) {
+                    if ((container.innerText.includes('לפני') || container.innerText.includes('ago')) && /\d/.test(container.innerText)) {
+                        const lines = container.innerText.split('\n');
+                        const timeLine = lines.find(l => (l.includes('לפני') || l.includes('ago')) && /\d/.test(l));
+                        if (timeLine) dateStr = timeLine;
                     }
                     container = container.parentElement;
                     depth++;
                 }
 
-                // חילוץ תמונה
                 let img = null;
                 container = link.parentElement;
                 depth = 0;
@@ -119,30 +109,43 @@ async function run() {
             return results;
         });
 
-        // סינון כפילויות + 24h אחרונות
         const uniqueArticles = Array.from(new Map(articles.map(item => [item.link, item])).values());
-        const now = new Date();
-        const oneDayAgo = new Date(now.getTime() - (MAX_ARTICLE_AGE_HOURS * 60 * 60 * 1000));
-        const recentArticles = uniqueArticles.filter(article => new Date(article.pubDate) >= oneDayAgo);
         
-        console.log(`🔎 נמצאו ${uniqueArticles.length} כולל, ${recentArticles.length} מ-24h אחרונות.`);
+        const now = new Date();
+        const cutoffTime = new Date(now.getTime() - (MAX_AGE_HOURS * 60 * 60 * 1000));
+        const recentArticles = uniqueArticles.filter(article => {
+            const pubDate = new Date(article.pubDate);
+            return pubDate >= cutoffTime;
+        });
+        
+        console.log(`🔎 נמצאו ${uniqueArticles.length} כולל, ${recentArticles.length} מ-${MAX_AGE_HOURS}h אחרונות.`);
 
-        // --- שמירה חכמה ---
+        // --- בדיקה חכמה (רק את מה שנמצא!) ---
         const articlesCollection = db.collection('artifacts').doc(APP_ID)
             .collection('public').doc('data').collection('articles');
 
-        const existingDocs = await articlesCollection.select('link').get();
-        const existingLinks = new Set(existingDocs.docs.map(d => d.data().link));
+        const linksToCheck = recentArticles.map(a => a.link);
+        const existingLinks = new Set();
+        let totalReads = 0;
+
+        // בדוק בקבוצות של 10 (Firestore limit)
+        for (let i = 0; i < linksToCheck.length; i += 10) {
+            const batch = linksToCheck.slice(i, i + 10);
+            const snapshot = await articlesCollection
+                .where('link', 'in', batch)
+                .select('link')
+                .get();
+            totalReads += snapshot.size;
+            snapshot.docs.forEach(doc => existingLinks.add(doc.data().link));
+        }
+
         const newArticles = recentArticles.filter(a => !existingLinks.has(a.link));
-        
-        console.log(`📦 קיימות: ${existingDocs.size}, חדשות: ${newArticles.length}`);
+        console.log(`📦 נבדקו ${linksToCheck.length} לינקים (${totalReads} reads), חדשות: ${newArticles.length}`);
 
         if (newArticles.length > 0) {
             const batch = db.batch();
             newArticles.forEach(article => {
-                const articleId = Buffer.from(article.link).toString('base64').replace(/[^a-zA-Z0-9]/g, '').substring(0, 60);
-                const docRef = articlesCollection.doc(articleId);
-                
+                const docRef = articlesCollection.doc();
                 batch.set(docRef, {
                     ...article,
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -155,33 +158,15 @@ async function run() {
                     assignedTo: null,
                     isCustom: false,
                     hasCountedWriting: false
-                }, { merge: true });
+                });
             });
             await batch.commit();
-            console.log(`💾 נשמרו ${newArticles.length} כתבות חדשות.`);
+            console.log(`💾 נשמרו ${newArticles.length} כתבות.`);
+        } else {
+            console.log("👌 אין כתבות חדשות.");
         }
 
-        // --- ניקוי כפוי של new >48h (למרות index) ---
-        console.log("🧹 ניקוי כפוי new >48h...");
-        const forceCleanup = await articlesCollection.where('status', '==', 'new').get();
-        const docsToDelete = [];
-        forceCleanup.docs.forEach(doc => {
-            const data = doc.data();
-            const createdDate = data.createdAt ? data.createdAt.toDate() : new Date(0);
-            const ageHours = (Date.now() - createdDate) / (3600*1000);
-            if (ageHours > 48) docsToDelete.push(doc.ref);
-        });
-
-        if (docsToDelete.length > 0) {
-            const batch = db.batch();
-            docsToDelete.forEach(ref => batch.delete(ref));
-            await batch.commit();
-            console.log(`🗑️ נוקה ${docsToDelete.length} new >48h.`);
-        }
-
-        // --- ניקוי חכם ---
         await cleanupSmart();
-
         await updateStatusTime();
         console.log("🎉 ריצה הסתיימה בהצלחה!");
 
@@ -194,40 +179,72 @@ async function run() {
     }
 }
 
-// === ניקוי חכם ===
 async function cleanupSmart() {
     console.log("🧹 ניקוי חכם...");
     try {
         const articlesRef = db.collection('artifacts').doc(APP_ID)
             .collection('public').doc('data').collection('articles');
         
-        const now = admin.firestore.Timestamp.now();
-
-        // עבודה >30 יום
-        const oldWork = await articlesRef.where('status', '!=', 'new')
-            .where('createdAt', '<', new admin.firestore.Timestamp(now.seconds - KEEP_WORK_DAYS*86400, 0))
-            .limit(100).get();
-        if (!oldWork.empty) {
+        const allNew = await articlesRef.where('status', '==', 'new').get();
+        console.log(`📊 ${allNew.size} כתבות new.`);
+        
+        if (!allNew.empty) {
             const batch = db.batch();
-            oldWork.docs.forEach(doc => batch.delete(doc.ref));
-            await batch.commit();
-            console.log(`🗑️ נמחקו ${oldWork.size} עבודה >30 יום.`);
+            let deleteCount = 0;
+            const now = new Date();
+            const twoDaysAgo = new Date(now.getTime() - (MAX_NEW_DAYS * 24 * 60 * 60 * 1000));
+
+            const docs = allNew.docs.map(d => ({ id: d.id, ref: d.ref, ...d.data() }));
+            docs.sort((a, b) => new Date(a.pubDate) - new Date(b.pubDate));
+
+            docs.forEach((doc, index) => {
+                const pubDate = new Date(doc.pubDate);
+                if (pubDate < twoDaysAgo || (docs.length > KEEP_NEW_LIMIT && index < (docs.length - KEEP_NEW_LIMIT))) {
+                    batch.delete(doc.ref);
+                    deleteCount++;
+                }
+            });
+
+            if (deleteCount > 0) {
+                await batch.commit();
+                console.log(`🗑️ נמחקו ${deleteCount} new ישנות.`);
+            } else {
+                console.log("✅ אין new למחיקה.");
+            }
         }
 
-        // מגבלה על new
-        const newCountSnap = await articlesRef.where('status', '==', 'new').count().get();
-        if (newCountSnap.data().count > KEEP_NEW_LIMIT) {
-            const excess = await articlesRef.where('status', '==', 'new')
-                .orderBy('createdAt').limit(newCountSnap.data().count - KEEP_NEW_LIMIT + 10).get();
-            const batch = db.batch();
-            excess.docs.forEach(doc => batch.delete(doc.ref));
-            await batch.commit();
-            console.log(`🗑️ נמחקו ${excess.size} new עודפות.`);
+        // ניקוי עבודה (רק אם >500)
+        const totalCount = await articlesRef.count().get();
+        console.log(`📊 סה"כ ${totalCount.data().count} כתבות.`);
+
+        if (totalCount.data().count > 500) {
+            console.log("🧹 בודק עבודה ישנות...");
+            const allArticles = await articlesRef.get();
+            const workBatch = db.batch();
+            let workDeleteCount = 0;
+            const thirtyDaysAgo = new Date(Date.now() - (KEEP_WORK_DAYS * 24 * 60 * 60 * 1000));
+
+            allArticles.docs.forEach(doc => {
+                const data = doc.data();
+                if (data.status !== 'new') {
+                    const createdDate = data.createdAt ? data.createdAt.toDate() : new Date(0);
+                    if (createdDate < thirtyDaysAgo) {
+                        workBatch.delete(doc.ref);
+                        workDeleteCount++;
+                    }
+                }
+            });
+
+            if (workDeleteCount > 0) {
+                await workBatch.commit();
+                console.log(`🗑️ נמחקו ${workDeleteCount} עבודה >30 יום.`);
+            }
+        } else {
+            console.log("✅ <500 כתבות, דילוג.");
         }
 
     } catch (error) {
         console.error("⚠️ שגיאת ניקוי:", error.message);
-        if (error.message.includes('index')) console.log("💡 צור index: status+createdAt");
     }
 }
 
@@ -242,7 +259,8 @@ async function aggressiveAutoScroll(page) {
                 totalHeight += distance;
                 count++;
                 if (count > 40 || totalHeight >= document.body.scrollHeight) {
-                    clearInterval(timer); resolve();
+                    clearInterval(timer);
+                    resolve();
                 }
             }, 50);
         });

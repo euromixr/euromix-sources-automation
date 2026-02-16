@@ -1,9 +1,5 @@
 const admin = require("firebase-admin");
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-
-// ✅ הפעל Stealth
-puppeteer.use(StealthPlugin());
+const { chromium } = require('playwright');
 
 const APP_ID = 'euromix-pro-v4-wp';
 const TARGET_URL = "https://www.euromix.co.il/a123/";
@@ -33,55 +29,49 @@ function initFirebase() {
 const db = initFirebase();
 
 async function run() {
-    console.log("🚀 מתחיל ריצה מלאה...");
+    console.log("🚀 מתחיל ריצה עם Playwright...");
     
     let browser;
     try {
-        console.log("🌐 מפעיל דפדפן stealth...");
-        browser = await puppeteer.launch({ 
-            headless: "new",
+        console.log("🌐 מפעיל דפדפן Chromium...");
+        browser = await chromium.launch({
+            headless: true,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-features=IsolateOrigins,site-per-process'
-            ],
-            timeout: 30000
+                '--disable-dev-shm-usage'
+            ]
         });
         console.log("✅ דפדפן פעיל!");
         
-        const page = await browser.newPage();
-        await page.setDefaultTimeout(120000);
-        
-        // ✅ User agent אמיתי
-        await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        
-        await page.setExtraHTTPHeaders({
-            'Accept-Language': 'he-IL,he;q=0.9,en-US;q=0.8',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        const context = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            locale: 'he-IL',
+            timezoneId: 'Asia/Jerusalem',
+            viewport: { width: 1920, height: 1080 }
         });
         
+        const page = await context.newPage();
         await updateStatusTime();
 
         console.log(`🔗 טוען ${TARGET_URL}...`);
-        await page.setViewport({ width: 1920, height: 1080 });
-        
         await page.goto(TARGET_URL, { 
-            waitUntil: 'networkidle0',
+            waitUntil: 'networkidle',
             timeout: 120000 
         });
 
-        // ✅ המתנה ל-Cloudflare (תיקון!)
-        console.log("⏳ ממתין ל-Cloudflare...");
-        await new Promise(resolve => setTimeout(resolve, 8000));
+        console.log("⏳ ממתין לטעינה מלאה...");
+        await page.waitForTimeout(10000);
         
         const title = await page.title();
         console.log("📄 כותרת העמוד:", title);
         
-        if (title.includes("Just a moment") || title.includes("Cloudflare")) {
-            console.log("⚠️ עדיין ב-Cloudflare, ממתין עוד...");
-            await new Promise(resolve => setTimeout(resolve, 10000));
+        // בדיקת Cloudflare
+        if (title.includes("רק רגע") || title.includes("Just a moment") || title.includes("Cloudflare")) {
+            console.log("⚠️ זוהה Cloudflare, ממתין 20 שניות נוספות...");
+            await page.waitForTimeout(20000);
+            const newTitle = await page.title();
+            console.log("📄 כותרת לאחר המתנה:", newTitle);
         }
         
         const bodyText = await page.evaluate(() => document.body.innerText);
@@ -89,7 +79,24 @@ async function run() {
         
         console.log("✅ העמוד נטען!");
 
-        await aggressiveAutoScroll(page);
+        // גלילה
+        console.log("📜 מבצע גלילה...");
+        await page.evaluate(async () => {
+            await new Promise((resolve) => {
+                let totalHeight = 0;
+                const distance = 100;
+                let count = 0;
+                const timer = setInterval(() => {
+                    window.scrollBy(0, distance);
+                    totalHeight += distance;
+                    count++;
+                    if (count > 40 || totalHeight >= document.body.scrollHeight) {
+                        clearInterval(timer);
+                        resolve();
+                    }
+                }, 50);
+            });
+        });
         console.log("✅ גלילה הושלמה!");
 
         console.log("🔍 מחלץ כתבות...");
@@ -298,25 +305,6 @@ async function cleanupSmart() {
     } catch (error) {
         console.error("⚠️ שגיאת ניקוי:", error.message);
     }
-}
-
-async function aggressiveAutoScroll(page) {
-    await page.evaluate(async () => {
-        await new Promise((resolve) => {
-            let totalHeight = 0;
-            const distance = 100;
-            let count = 0;
-            const timer = setInterval(() => {
-                window.scrollBy(0, distance);
-                totalHeight += distance;
-                count++;
-                if (count > 40 || totalHeight >= document.body.scrollHeight) {
-                    clearInterval(timer);
-                    resolve();
-                }
-            }, 50);
-        });
-    });
 }
 
 async function updateStatusTime() {

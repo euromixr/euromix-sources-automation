@@ -1,13 +1,7 @@
 const admin = require("firebase-admin");
 const puppeteer = require("puppeteer");
 
-const APP_ID = 'euromix-pro-v4-wp';
-const TARGET_URL = "https://www.euromix.co.il/a123/";
-const MAX_AGE_HOURS = 48;
-const KEEP_NEW_LIMIT = 300;
-const MAX_NEW_DAYS = 2;
-const KEEP_WORK_DAYS = 30;
-
+// --- 1. אתחול מאובטח (כמו במערכת החדשה) ---
 function initFirebase() {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
     if (!serviceAccountRaw) {
@@ -27,46 +21,28 @@ function initFirebase() {
 }
 
 const db = initFirebase();
+const APP_ID = 'euromix-pro-v4-wp'; // משתמשים ב-ID החדש
+const TARGET_URL = "https://www.euromix.co.il/a123/";
 
 async function run() {
-    console.log("🚀 מתחיל ריצה מלאה...");
+    console.log("🚀 מתחיל ריצה (לוגיקה משולבת)...");
     
     let browser;
     try {
-        console.log("🌐 מפעיל דפדפן...");
         browser = await puppeteer.launch({ 
             headless: "new",
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-extensions',
-                '--single-process',
-                '--no-zygote'
-            ],
-            timeout: 30000
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--disable-gpu', '--single-process', '--no-zygote'] 
         });
-        console.log("✅ דפדפן פעיל!");
         
         const page = await browser.newPage();
-        await page.setDefaultTimeout(60000);
         await updateStatusTime();
 
-        console.log(`🔗 טוען ${TARGET_URL}...`);
+        // הגדרות דפדפן
         await page.setViewport({ width: 1920, height: 1080 });
-        await page.goto(TARGET_URL, { 
-            waitUntil: 'domcontentloaded',  // ← שינוי! פחות קפדני
-            timeout: 90000 
-        });
-        console.log("✅ העמוד נטען!");
-
+        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 180000 });
         await aggressiveAutoScroll(page);
-        console.log("✅ גלילה הושלמה!");
 
-        console.log("🔍 מחלץ כתבות...");
+        // --- שלב החילוץ (המוח הישן והטוב) ---
         const articles = await page.evaluate(() => {
             const results = [];
             const allLinks = document.querySelectorAll('a');
@@ -89,23 +65,28 @@ async function run() {
                 let title = link.innerText.trim();
                 
                 if (!href || href.length < 10) return;
-                if (href.includes('euromix.co.il') || href.includes('facebook.com') || 
-                    href.includes('twitter.com') || href.includes('whatsapp.com')) return;
+                
+                // *** הסינון הקריטי מהקוד הישן ***
+                // מתעלם מקישורים פנימיים של האתר שלך וממדיה חברתית
+                if (href.includes('euromix.co.il') || href.includes('facebook.com') || href.includes('twitter.com') || href.includes('whatsapp.com')) return;
+                
                 if (title.length < 10) return;
 
+                // לוגיקת חילוץ תאריך (מהקוד הישן)
                 let dateStr = null;
                 let container = link.parentElement;
                 let depth = 0;
                 while (container && !dateStr && depth < 3) {
                     if ((container.innerText.includes('לפני') || container.innerText.includes('ago')) && /\d/.test(container.innerText)) {
-                        const lines = container.innerText.split('\n');
-                        const timeLine = lines.find(l => (l.includes('לפני') || l.includes('ago')) && /\d/.test(l));
-                        if (timeLine) dateStr = timeLine;
+                         const lines = container.innerText.split('\n');
+                         const timeLine = lines.find(l => (l.includes('לפני') || l.includes('ago')) && /\d/.test(l));
+                         if (timeLine) dateStr = timeLine;
                     }
                     container = container.parentElement;
                     depth++;
                 }
 
+                // לוגיקת חילוץ תמונה (מהקוד הישן)
                 let img = null;
                 container = link.parentElement;
                 depth = 0;
@@ -123,48 +104,35 @@ async function run() {
                 try { const urlObj = new URL(href); source = urlObj.hostname.replace('www.', ''); } catch (e) {}
 
                 results.push({
-                    title, link: href, source, img,
+                    title: title, link: href, source: source, img: img,
                     pubDate: parseRelativeTime(dateStr), snippet: title
                 });
             });
             return results;
         });
-        console.log(`✅ נמצאו ${articles.length} לינקים גולמיים!`);
 
+        // סינון כפילויות בזיכרון
         const uniqueArticles = Array.from(new Map(articles.map(item => [item.link, item])).values());
-        
-        const now = new Date();
-        const cutoffTime = new Date(now.getTime() - (MAX_AGE_HOURS * 60 * 60 * 1000));
-        const recentArticles = uniqueArticles.filter(article => {
-            const pubDate = new Date(article.pubDate);
-            return pubDate >= cutoffTime;
-        });
-        
-        console.log(`🔎 נמצאו ${uniqueArticles.length} כולל, ${recentArticles.length} מ-${MAX_AGE_HOURS}h אחרונות.`);
+        console.log(`🔎 נמצאו ${uniqueArticles.length} כתבות (מקורות חיצוניים בלבד).`);
 
+        // --- שלב השמירה (השיטה החסכונית - Bulk Check) ---
+        // זה מה שמונע את קריסת המכסה
+        console.log("📦 בודק אילו כתבות כבר קיימות במסד...");
         const articlesCollection = db.collection('artifacts').doc(APP_ID)
             .collection('public').doc('data').collection('articles');
 
-        const linksToCheck = recentArticles.map(a => a.link);
-        const existingLinks = new Set();
-        let totalReads = 0;
-
-        console.log(`🔍 בודק ${linksToCheck.length} לינקים...`);
-        for (let i = 0; i < linksToCheck.length; i += 10) {
-            const batch = linksToCheck.slice(i, i + 10);
-            const snapshot = await articlesCollection
-                .where('link', 'in', batch)
-                .select('link')
-                .get();
-            totalReads += snapshot.size;
-            snapshot.docs.forEach(doc => existingLinks.add(doc.data().link));
-        }
-
-        const newArticles = recentArticles.filter(a => !existingLinks.has(a.link));
-        console.log(`📦 נבדקו ${linksToCheck.length} לינקים (${totalReads} reads), חדשות: ${newArticles.length}`);
+        // שולפים רק קישורים קיימים (קריאה אחת זולה)
+        const existingDocs = await articlesCollection.select('link').get();
+        const existingLinks = new Set(existingDocs.docs.map(d => d.data().link));
+        
+        // מסננים בזיכרון
+        const newArticles = uniqueArticles.filter(a => !existingLinks.has(a.link));
+        console.log(`✨ יש להוסיף ${newArticles.length} כתבות חדשות.`);
 
         if (newArticles.length > 0) {
             const batch = db.batch();
+            let count = 0;
+            
             newArticles.forEach(article => {
                 const docRef = articlesCollection.doc();
                 batch.set(docRef, {
@@ -180,97 +148,77 @@ async function run() {
                     isCustom: false,
                     hasCountedWriting: false
                 });
+                count++;
             });
+            
+            // שומרים ב"מכה אחת"
             await batch.commit();
-            console.log(`💾 נשמרו ${newArticles.length} כתבות.`);
+            console.log(`💾 נשמרו ${count} כתבות.`);
         } else {
             console.log("👌 אין כתבות חדשות.");
         }
 
-        await cleanupSmart();
+        // --- ניקוי חכם (כדי לא לצבור זבל) ---
+        // מפעילים רק אם יש המון כתבות כדי לא לבזבז משאבים סתם
+        if (existingDocs.size > 350) {
+            await cleanupQuotaSafe();
+        }
+
         await updateStatusTime();
-        console.log("🎉 ריצה הסתיימה בהצלחה!");
+        console.log("🎉 ריצה הסתיימה בהצלחה.");
 
     } catch (e) {
-        console.error("❌ שגיאה בריצה:", e.message);
-        console.error("Stack:", e.stack);
+        console.error("❌ שגיאה בריצה:", e);
         process.exit(1);
     } finally {
-        if (browser) {
-            console.log("🔒 סוגר דפדפן...");
-            await browser.close();
-        }
-        setTimeout(() => process.exit(0), 2000);
+        if (browser) await browser.close();
+        setTimeout(() => process.exit(0), 1000);
     }
 }
 
-async function cleanupSmart() {
-    console.log("🧹 ניקוי חכם...");
+// === פונקציית ניקוי חסכונית ===
+async function cleanupQuotaSafe() {
+    console.log("🧹 מבצע ניקוי...");
     try {
-        const articlesRef = db.collection('artifacts').doc(APP_ID)
-            .collection('public').doc('data').collection('articles');
+        const articlesRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
+        // שולף רק כתבות בסטטוס 'new' (לא נוגעים בכתבות בטיפול)
+        const snapshot = await articlesRef.where('status', '==', 'new').get();
         
-        const allNew = await articlesRef.where('status', '==', 'new').get();
-        console.log(`📊 ${allNew.size} כתבות new.`);
+        if (snapshot.empty) return;
+
+        const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data(), ref: d.ref }));
+        // מיון: ישן לחדש
+        docs.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
+
+        const batch = db.batch();
+        let deleteCount = 0;
+        const now = new Date();
         
-        if (!allNew.empty) {
-            const batch = db.batch();
-            let deleteCount = 0;
-            const now = new Date();
-            const twoDaysAgo = new Date(now.getTime() - (MAX_NEW_DAYS * 24 * 60 * 60 * 1000));
+        // הגדרות מגבלה
+        const KEEP_NEW_LIMIT = 300; 
+        const MAX_DAYS = 5;
 
-            const docs = allNew.docs.map(d => ({ id: d.id, ref: d.ref, ...d.data() }));
-            docs.sort((a, b) => new Date(a.pubDate) - new Date(b.pubDate));
+        docs.forEach((doc, index) => {
+            let shouldDelete = false;
+            const pubDate = new Date(doc.pubDate);
+            
+            // אם הכתבה ישנה מדי
+            if ((now - pubDate) / (1000 * 60 * 60 * 24) > MAX_DAYS) shouldDelete = true;
+            // אם יש יותר מדי כתבות ממתינות
+            if (index >= KEEP_NEW_LIMIT) shouldDelete = true;
 
-            docs.forEach((doc, index) => {
-                const pubDate = new Date(doc.pubDate);
-                if (pubDate < twoDaysAgo || (docs.length > KEEP_NEW_LIMIT && index < (docs.length - KEEP_NEW_LIMIT))) {
-                    batch.delete(doc.ref);
-                    deleteCount++;
-                }
-            });
-
-            if (deleteCount > 0) {
-                await batch.commit();
-                console.log(`🗑️ נמחקו ${deleteCount} new ישנות.`);
-            } else {
-                console.log("✅ אין new למחיקה.");
+            if (shouldDelete) {
+                batch.delete(doc.ref);
+                deleteCount++;
             }
+        });
+
+        if (deleteCount > 0) {
+            await batch.commit();
+            console.log(`🗑️ נמחקו ${deleteCount} כתבות ישנות.`);
         }
-
-        const totalCount = await articlesRef.count().get();
-        console.log(`📊 סה"כ ${totalCount.data().count} כתבות.`);
-
-        if (totalCount.data().count > 500) {
-            console.log("🧹 בודק עבודה ישנות...");
-            const allArticles = await articlesRef.get();
-            const workBatch = db.batch();
-            let workDeleteCount = 0;
-            const thirtyDaysAgo = new Date(Date.now() - (KEEP_WORK_DAYS * 24 * 60 * 60 * 1000));
-
-            allArticles.docs.forEach(doc => {
-                const data = doc.data();
-                if (data.status !== 'new') {
-                    const createdDate = data.createdAt ? data.createdAt.toDate() : new Date(0);
-                    if (createdDate < thirtyDaysAgo) {
-                        workBatch.delete(doc.ref);
-                        workDeleteCount++;
-                    }
-                }
-            });
-
-            if (workDeleteCount > 0) {
-                await workBatch.commit();
-                console.log(`🗑️ נמחקו ${workDeleteCount} עבודה >30 יום.`);
-            } else {
-                console.log("✅ אין עבודה ישנות.");
-            }
-        } else {
-            console.log("✅ <500 כתבות, דילוג על ניקוי עבודה.");
-        }
-
     } catch (error) {
-        console.error("⚠️ שגיאת ניקוי:", error.message);
+        console.error("⚠️ שגיאה בניקוי:", error.message);
     }
 }
 
@@ -284,9 +232,8 @@ async function aggressiveAutoScroll(page) {
                 window.scrollBy(0, distance);
                 totalHeight += distance;
                 count++;
-                if (count > 40 || totalHeight >= document.body.scrollHeight) {
-                    clearInterval(timer);
-                    resolve();
+                if (count > 40 || totalHeight >= document.body.scrollHeight) { 
+                    clearInterval(timer); resolve(); 
                 }
             }, 50);
         });

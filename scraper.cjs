@@ -3,10 +3,10 @@ const puppeteer = require("puppeteer");
 
 const APP_ID = 'euromix-pro-v4-wp';
 const TARGET_URL = "https://www.euromix.co.il/a123/";
-const MAX_AGE_HOURS = 48;
-const KEEP_NEW_LIMIT = 300;
-const MAX_NEW_DAYS = 2;
-const KEEP_WORK_DAYS = 30;
+const MAX_AGE_HOURS = 48;        // שמור 48h
+const KEEP_NEW_LIMIT = 300;      
+const MAX_NEW_DAYS = 2;          
+const KEEP_WORK_DAYS = 30;       
 
 function initFirebase() {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -46,6 +46,7 @@ async function run() {
         await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 180000 });
         await aggressiveAutoScroll(page);
 
+        // --- חילוץ (מהקוד הישן שעובד!) ---
         const articles = await page.evaluate(() => {
             const results = [];
             const allLinks = document.querySelectorAll('a');
@@ -68,8 +69,11 @@ async function run() {
                 let title = link.innerText.trim();
                 
                 if (!href || href.length < 10) return;
+                
+                // ✅ הסינון המקורי - עובד מצוין!
                 if (href.includes('euromix.co.il') || href.includes('facebook.com') || 
                     href.includes('twitter.com') || href.includes('whatsapp.com')) return;
+                
                 if (title.length < 10) return;
 
                 let dateStr = null;
@@ -111,6 +115,7 @@ async function run() {
 
         const uniqueArticles = Array.from(new Map(articles.map(item => [item.link, item])).values());
         
+        // ✅ סינון 48h
         const now = new Date();
         const cutoffTime = new Date(now.getTime() - (MAX_AGE_HOURS * 60 * 60 * 1000));
         const recentArticles = uniqueArticles.filter(article => {
@@ -120,7 +125,7 @@ async function run() {
         
         console.log(`🔎 נמצאו ${uniqueArticles.length} כולל, ${recentArticles.length} מ-${MAX_AGE_HOURS}h אחרונות.`);
 
-        // --- בדיקה חכמה (רק את מה שנמצא!) ---
+        // ✅ בדיקה אופטימלית (where...in)
         const articlesCollection = db.collection('artifacts').doc(APP_ID)
             .collection('public').doc('data').collection('articles');
 
@@ -128,7 +133,6 @@ async function run() {
         const existingLinks = new Set();
         let totalReads = 0;
 
-        // בדוק בקבוצות של 10 (Firestore limit)
         for (let i = 0; i < linksToCheck.length; i += 10) {
             const batch = linksToCheck.slice(i, i + 10);
             const snapshot = await articlesCollection
@@ -166,6 +170,7 @@ async function run() {
             console.log("👌 אין כתבות חדשות.");
         }
 
+        // ✅ ניקוי משופר
         await cleanupSmart();
         await updateStatusTime();
         console.log("🎉 ריצה הסתיימה בהצלחה!");
@@ -199,80 +204,4 @@ async function cleanupSmart() {
 
             docs.forEach((doc, index) => {
                 const pubDate = new Date(doc.pubDate);
-                if (pubDate < twoDaysAgo || (docs.length > KEEP_NEW_LIMIT && index < (docs.length - KEEP_NEW_LIMIT))) {
-                    batch.delete(doc.ref);
-                    deleteCount++;
-                }
-            });
-
-            if (deleteCount > 0) {
-                await batch.commit();
-                console.log(`🗑️ נמחקו ${deleteCount} new ישנות.`);
-            } else {
-                console.log("✅ אין new למחיקה.");
-            }
-        }
-
-        // ניקוי עבודה (רק אם >500)
-        const totalCount = await articlesRef.count().get();
-        console.log(`📊 סה"כ ${totalCount.data().count} כתבות.`);
-
-        if (totalCount.data().count > 500) {
-            console.log("🧹 בודק עבודה ישנות...");
-            const allArticles = await articlesRef.get();
-            const workBatch = db.batch();
-            let workDeleteCount = 0;
-            const thirtyDaysAgo = new Date(Date.now() - (KEEP_WORK_DAYS * 24 * 60 * 60 * 1000));
-
-            allArticles.docs.forEach(doc => {
-                const data = doc.data();
-                if (data.status !== 'new') {
-                    const createdDate = data.createdAt ? data.createdAt.toDate() : new Date(0);
-                    if (createdDate < thirtyDaysAgo) {
-                        workBatch.delete(doc.ref);
-                        workDeleteCount++;
-                    }
-                }
-            });
-
-            if (workDeleteCount > 0) {
-                await workBatch.commit();
-                console.log(`🗑️ נמחקו ${workDeleteCount} עבודה >30 יום.`);
-            }
-        } else {
-            console.log("✅ <500 כתבות, דילוג.");
-        }
-
-    } catch (error) {
-        console.error("⚠️ שגיאת ניקוי:", error.message);
-    }
-}
-
-async function aggressiveAutoScroll(page) {
-    await page.evaluate(async () => {
-        await new Promise((resolve) => {
-            let totalHeight = 0;
-            const distance = 100;
-            let count = 0;
-            const timer = setInterval(() => {
-                window.scrollBy(0, distance);
-                totalHeight += distance;
-                count++;
-                if (count > 40 || totalHeight >= document.body.scrollHeight) {
-                    clearInterval(timer);
-                    resolve();
-                }
-            }, 50);
-        });
-    });
-}
-
-async function updateStatusTime() {
-    try {
-        await db.collection('artifacts').doc(APP_ID)
-            .collection('public').doc('data').collection('settings').doc('status')
-            .set({ lastScrape: admin.firestore.Timestamp.now() }, { merge: true });
-    } catch(e) {}
-}
-
-run();
+                if (pubDate < twoDaysAgo || (docs.leng

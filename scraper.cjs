@@ -56,22 +56,28 @@ async function run() {
 
         console.log(`🔗 טוען ${TARGET_URL}...`);
         await page.goto(TARGET_URL, { 
-            waitUntil: 'networkidle',
-            timeout: 120000 
+            waitUntil: 'domcontentloaded',
+            timeout: 60000 
         });
 
         console.log("⏳ ממתין לטעינה מלאה...");
-        await page.waitForTimeout(10000);
+        await page.waitForTimeout(15000);
         
         const title = await page.title();
         console.log("📄 כותרת העמוד:", title);
         
         // בדיקת Cloudflare
         if (title.includes("רק רגע") || title.includes("Just a moment") || title.includes("Cloudflare")) {
-            console.log("⚠️ זוהה Cloudflare, ממתין 20 שניות נוספות...");
-            await page.waitForTimeout(20000);
+            console.log("⚠️ זוהה Cloudflare, ממתין 30 שניות נוספות...");
+            await page.waitForTimeout(30000);
             const newTitle = await page.title();
             console.log("📄 כותרת לאחר המתנה:", newTitle);
+            
+            if (newTitle.includes("רק רגע") || newTitle.includes("Just a moment")) {
+                console.log("❌ Cloudflare חוסם - מדלג על הריצה הזו");
+                await browser.close();
+                process.exit(0);
+            }
         }
         
         const bodyText = await page.evaluate(() => document.body.innerText);

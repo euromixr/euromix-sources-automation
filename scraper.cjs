@@ -1,7 +1,13 @@
 const admin = require("firebase-admin");
 const puppeteer = require("puppeteer");
 
-// --- שלב 1: אתחול ---
+const APP_ID = 'euromix-pro-v4-wp';
+const TARGET_URL = "https://www.euromix.co.il/a123/";
+const MAX_AGE_HOURS = 48;
+const KEEP_NEW_LIMIT = 300;
+const MAX_NEW_DAYS = 2;
+const KEEP_WORK_DAYS = 30;
+
 function initFirebase() {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
     if (!serviceAccountRaw) {
@@ -15,47 +21,71 @@ function initFirebase() {
         }
         return admin.firestore();
     } catch (error) {
+        console.error("❌ שגיאה בפענוח מפתח:", error.message);
         process.exit(1);
     }
 }
 
 const db = initFirebase();
-const APP_ID = 'euromix-pro-v4-wp'; 
-const TARGET_URL = "https://www.euromix.co.il/a123/";
 
 async function run() {
-    console.log("🚀 מתחיל ריצה...");
+    console.log("🚀 מתחיל ריצה מלאה...");
+    
     let browser;
     try {
+        console.log("🌐 מפעיל דפדפן...");
         browser = await puppeteer.launch({ 
             headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process', '--no-zygote'] 
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--disable-gpu',
+                '--disable-blink-features=AutomationControlled',
+                '--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+            ],
+            timeout: 30000
         });
+        console.log("✅ דפדפן פעיל!");
         
         const page = await browser.newPage();
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-        
+        await page.setDefaultTimeout(60000);
         await updateStatusTime();
 
+        console.log(`🔗 טוען ${TARGET_URL}...`);
         await page.setViewport({ width: 1920, height: 1080 });
-        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 120000 });
-        await aggressiveAutoScroll(page);
+        
+        await page.goto(TARGET_URL, { 
+            waitUntil: 'domcontentloaded',
+            timeout: 90000 
+        });
 
-        // --- חילוץ נתונים (אותו לוגיקה כמו קודם) ---
+        // ✅ DEBUG - בודק אם יש חסימה
+        console.log("📄 כותרת העמוד:", await page.title());
+        const bodyText = await page.evaluate(() => document.body.innerText);
+        console.log("📝 תוכן העמוד (100 תווים ראשונים):", bodyText.substring(0, 100));
+        
+        console.log("✅ העמוד נטען!");
+
+        await aggressiveAutoScroll(page);
+        console.log("✅ גלילה הושלמה!");
+
+        console.log("🔍 מחלץ כתבות...");
         const articles = await page.evaluate(() => {
             const results = [];
             const allLinks = document.querySelectorAll('a');
-            
+
             const parseRelativeTime = (text) => {
                 if (!text) return new Date().toISOString();
                 const now = new Date();
-                const match = text.toLowerCase().match(/(\d+)/);
+                const cleanText = text.toLowerCase();
+                const match = cleanText.match(/(\d+)/);
                 if (!match) return now.toISOString();
                 const num = parseInt(match[0]);
-                const clean = text.toLowerCase();
-                if (clean.includes('דק') || clean.includes('min')) now.setMinutes(now.getMinutes() - num);
-                else if (clean.includes('שע') || clean.includes('hour')) now.setHours(now.getHours() - num);
-                else if (clean.includes('יום') || clean.includes('day')) now.setDate(now.getDate() - num);
+                if (cleanText.includes('דק') || cleanText.includes('min')) now.setMinutes(now.getMinutes() - num);
+                else if (cleanText.includes('שע') || cleanText.includes('hour')) now.setHours(now.getHours() - num);
+                else if (cleanText.includes('יום') || cleanText.includes('ימים') || cleanText.includes('day')) now.setDate(now.getDate() - num);
                 return now.toISOString();
             };
 
@@ -64,15 +94,18 @@ async function run() {
                 let title = link.innerText.trim();
                 
                 if (!href || href.length < 10) return;
-                if (href.includes('facebook.com') || href.includes('twitter.com') || href.includes('whatsapp.com')) return;
+                if (href.includes('euromix.co.il') || href.includes('facebook.com') || 
+                    href.includes('twitter.com') || href.includes('whatsapp.com')) return;
                 if (title.length < 10) return;
 
                 let dateStr = null;
                 let container = link.parentElement;
                 let depth = 0;
                 while (container && !dateStr && depth < 3) {
-                    if (/\d/.test(container.innerText) && (container.innerText.includes('לפני') || container.innerText.includes('ago'))) {
-                         dateStr = container.innerText;
+                    if ((container.innerText.includes('לפני') || container.innerText.includes('ago')) && /\d/.test(container.innerText)) {
+                        const lines = container.innerText.split('\n');
+                        const timeLine = lines.find(l => (l.includes('לפני') || l.includes('ago')) && /\d/.test(l));
+                        if (timeLine) dateStr = timeLine;
                     }
                     container = container.parentElement;
                     depth++;
@@ -83,7 +116,10 @@ async function run() {
                 depth = 0;
                 while (container && !img && depth < 4) {
                     const foundImg = container.querySelector('img');
-                    if (foundImg) img = foundImg.src || foundImg.getAttribute('data-src');
+                    if (foundImg) {
+                        img = foundImg.src || foundImg.getAttribute('data-src');
+                        if (img && (img.includes('icon') || img.includes('logo'))) img = null;
+                    }
                     container = container.parentElement;
                     depth++;
                 }
@@ -92,36 +128,48 @@ async function run() {
                 try { const urlObj = new URL(href); source = urlObj.hostname.replace('www.', ''); } catch (e) {}
 
                 results.push({
-                    title: title, link: href, source: source, img: img,
+                    title, link: href, source, img,
                     pubDate: parseRelativeTime(dateStr), snippet: title
                 });
             });
             return results;
         });
+        console.log(`✅ נמצאו ${articles.length} לינקים גולמיים!`);
 
-        // סינון כפילויות פנימי
         const uniqueArticles = Array.from(new Map(articles.map(item => [item.link, item])).values());
-        console.log(`🔎 נמצאו ${uniqueArticles.length} כתבות בדף.`);
+        
+        const now = new Date();
+        const cutoffTime = new Date(now.getTime() - (MAX_AGE_HOURS * 60 * 60 * 1000));
+        const recentArticles = uniqueArticles.filter(article => {
+            const pubDate = new Date(article.pubDate);
+            return pubDate >= cutoffTime;
+        });
+        
+        console.log(`🔎 נמצאו ${uniqueArticles.length} כולל, ${recentArticles.length} מ-${MAX_AGE_HOURS}h אחרונות.`);
 
-        // --- שיפור קריטי: בדיקת קיום ב-Bulk (קריאה אחת במקום 961) ---
-        console.log("📦 מושך רשימת כתבות קיימות לבדיקה מהירה...");
         const articlesCollection = db.collection('artifacts').doc(APP_ID)
             .collection('public').doc('data').collection('articles');
-            
-        // שולף רק את השדה 'link' כדי לחסוך בתעבורה
-        const existingDocs = await articlesCollection.select('link').get();
-        const existingLinks = new Set(existingDocs.docs.map(d => d.data().link));
-        
-        // סינון בזיכרון (מהיר וחינמי)
-        const newArticles = uniqueArticles.filter(a => !existingLinks.has(a.link));
-        
-        console.log(`✨ מתוך ${uniqueArticles.length} כתבות, ${newArticles.length} הן חדשות.`);
+
+        const linksToCheck = recentArticles.map(a => a.link);
+        const existingLinks = new Set();
+        let totalReads = 0;
+
+        console.log(`🔍 בודק ${linksToCheck.length} לינקים...`);
+        for (let i = 0; i < linksToCheck.length; i += 10) {
+            const batch = linksToCheck.slice(i, i + 10);
+            const snapshot = await articlesCollection
+                .where('link', 'in', batch)
+                .select('link')
+                .get();
+            totalReads += snapshot.size;
+            snapshot.docs.forEach(doc => existingLinks.add(doc.data().link));
+        }
+
+        const newArticles = recentArticles.filter(a => !existingLinks.has(a.link));
+        console.log(`📦 נבדקו ${linksToCheck.length} לינקים (${totalReads} reads), חדשות: ${newArticles.length}`);
 
         if (newArticles.length > 0) {
             const batch = db.batch();
-            let count = 0;
-            
-            // שמירת החדשות בלבד
             newArticles.forEach(article => {
                 const docRef = articlesCollection.doc();
                 batch.set(docRef, {
@@ -137,66 +185,98 @@ async function run() {
                     isCustom: false,
                     hasCountedWriting: false
                 });
-                count++;
             });
-            
             await batch.commit();
-            console.log(`💾 נשמרו ${count} כתבות חדשות.`);
+            console.log(`💾 נשמרו ${newArticles.length} כתבות.`);
         } else {
-            console.log("👌 אין כתבות חדשות לשמירה.");
+            console.log("👌 אין כתבות חדשות.");
         }
 
-        // --- ניקוי (גם הוא עבר אופטימיזציה כדי לא לקרוא סתם) ---
-        if (existingDocs.size > 350) { 
-             await cleanupQuotaSafe();
-        }
-
+        await cleanupSmart();
         await updateStatusTime();
-        console.log("🎉 תהליך הסתיים.");
+        console.log("🎉 ריצה הסתיימה בהצלחה!");
 
     } catch (e) {
-        console.error("❌ שגיאה:", e);
+        console.error("❌ שגיאה בריצה:", e.message);
+        console.error("Stack:", e.stack);
         process.exit(1);
     } finally {
-        if (browser) await browser.close();
-        setTimeout(() => process.exit(0), 1000);
+        if (browser) {
+            console.log("🔒 סוגר דפדפן...");
+            await browser.close();
+        }
+        setTimeout(() => process.exit(0), 2000);
     }
 }
 
-async function cleanupQuotaSafe() {
-    console.log("🧹 מבצע ניקוי...");
+async function cleanupSmart() {
+    console.log("🧹 ניקוי חכם...");
     try {
-        const articlesRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
-        // קורא רק כתבות בסטטוס 'new' כדי לחסוך
-        const snapshot = await articlesRef.where('status', '==', 'new').get();
-        if (snapshot.empty) return;
+        const articlesRef = db.collection('artifacts').doc(APP_ID)
+            .collection('public').doc('data').collection('articles');
+        
+        const allNew = await articlesRef.where('status', '==', 'new').get();
+        console.log(`📊 ${allNew.size} כתבות new.`);
+        
+        if (!allNew.empty) {
+            const batch = db.batch();
+            let deleteCount = 0;
+            const now = new Date();
+            const twoDaysAgo = new Date(now.getTime() - (MAX_NEW_DAYS * 24 * 60 * 60 * 1000));
 
-        const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data(), ref: d.ref }));
-        docs.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
+            const docs = allNew.docs.map(d => ({ id: d.id, ref: d.ref, ...d.data() }));
+            docs.sort((a, b) => new Date(a.pubDate) - new Date(b.pubDate));
 
-        const batch = db.batch();
-        let deleteCount = 0;
-        const now = new Date();
-        const KEEP_NEW_LIMIT = 100; // שומר רק 100 אחרונות בסטטוס 'חדש'
-        const MAX_DAYS = 4;
+            docs.forEach((doc, index) => {
+                const pubDate = new Date(doc.pubDate);
+                if (pubDate < twoDaysAgo || (docs.length > KEEP_NEW_LIMIT && index < (docs.length - KEEP_NEW_LIMIT))) {
+                    batch.delete(doc.ref);
+                    deleteCount++;
+                }
+            });
 
-        docs.forEach((doc, index) => {
-            let shouldDelete = false;
-            const pubDate = new Date(doc.pubDate);
-            if ((now - pubDate) / (1000 * 60 * 60 * 24) > MAX_DAYS) shouldDelete = true;
-            if (index >= KEEP_NEW_LIMIT) shouldDelete = true;
-
-            if (shouldDelete) {
-                batch.delete(doc.ref);
-                deleteCount++;
+            if (deleteCount > 0) {
+                await batch.commit();
+                console.log(`🗑️ נמחקו ${deleteCount} new ישנות.`);
+            } else {
+                console.log("✅ אין new למחיקה.");
             }
-        });
-
-        if (deleteCount > 0) {
-            await batch.commit();
-            console.log(`🗑️ נמחקו ${deleteCount} כתבות.`);
         }
-    } catch (error) { console.error("שגיאת ניקוי:", error.message); }
+
+        const totalCount = await articlesRef.count().get();
+        console.log(`📊 סה"כ ${totalCount.data().count} כתבות.`);
+
+        if (totalCount.data().count > 500) {
+            console.log("🧹 בודק עבודה ישנות...");
+            const allArticles = await articlesRef.get();
+            const workBatch = db.batch();
+            let workDeleteCount = 0;
+            const thirtyDaysAgo = new Date(Date.now() - (KEEP_WORK_DAYS * 24 * 60 * 60 * 1000));
+
+            allArticles.docs.forEach(doc => {
+                const data = doc.data();
+                if (data.status !== 'new') {
+                    const createdDate = data.createdAt ? data.createdAt.toDate() : new Date(0);
+                    if (createdDate < thirtyDaysAgo) {
+                        workBatch.delete(doc.ref);
+                        workDeleteCount++;
+                    }
+                }
+            });
+
+            if (workDeleteCount > 0) {
+                await workBatch.commit();
+                console.log(`🗑️ נמחקו ${workDeleteCount} עבודה >30 יום.`);
+            } else {
+                console.log("✅ אין עבודה ישנות.");
+            }
+        } else {
+            console.log("✅ <500 כתבות, דילוג על ניקוי עבודה.");
+        }
+
+    } catch (error) {
+        console.error("⚠️ שגיאת ניקוי:", error.message);
+    }
 }
 
 async function aggressiveAutoScroll(page) {
@@ -209,8 +289,9 @@ async function aggressiveAutoScroll(page) {
                 window.scrollBy(0, distance);
                 totalHeight += distance;
                 count++;
-                if (count > 30 || totalHeight >= document.body.scrollHeight) { 
-                    clearInterval(timer); resolve(); 
+                if (count > 40 || totalHeight >= document.body.scrollHeight) {
+                    clearInterval(timer);
+                    resolve();
                 }
             }, 50);
         });

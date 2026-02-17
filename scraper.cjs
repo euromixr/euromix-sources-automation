@@ -3,9 +3,9 @@ const axios = require('axios');
 const Parser = require('rss-parser');
 
 const APP_ID = 'euromix-pro-v4-wp';
-const MAX_AGE_HOURS = 24;           // ✅ שונה מ-48 ל-24 שעות
-const KEEP_WORK_DAYS = 30;          // ✅ כתבות בתהליך - 30 יום
-const KEEP_NEW_HOURS = 48;          // ✅ כתבות new - 48 שעות
+const MAX_AGE_HOURS = 24;           // 24 שעות ייבוא
+const KEEP_WORK_DAYS = 30;          // כתבות בתהליך - 30 יום
+const KEEP_NEW_HOURS = 48;          // כתבות new - 48 שעות
 
 const GOOGLE_ALERT_FEEDS = [
     "https://www.google.com/alerts/feeds/15835567105207766825/5913675776665511822",
@@ -100,6 +100,8 @@ const GOOGLE_ALERT_FEEDS = [
     "https://www.google.com/alerts/feeds/15835567105207766825/4171072731871609982"
 ];
 
+
+
 function initFirebase() {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
     if (!serviceAccountRaw) {
@@ -146,20 +148,51 @@ async function run() {
                 
                 if (feed.items && feed.items.length > 0) {
                     const articles = feed.items.map(item => {
+                        // ✅ חילוץ Google redirect URL + ניקוי מלא
+                        let actualLink = item.link || '';
                         let source = "Unknown";
-                        try { 
-                            const urlObj = new URL(item.link); 
-                            source = urlObj.hostname.replace('www.', ''); 
-                        } catch (e) {}
 
-                        // Clean HTML tags from title and snippet
-                        const cleanTitle = (item.title || '').replace(/<[^>]*>/g, '').trim();
-                        const cleanSnippet = (item.contentSnippet || item.title || '').replace(/<[^>]*>/g, '').substring(0, 200).trim();
+                        try {
+                            // חילוץ Google redirect URL
+                            if (actualLink.includes('google.com/url')) {
+                                const urlObj = new URL(actualLink);
+                                const realUrl = urlObj.searchParams.get('url');
+                                if (realUrl) {
+                                    actualLink = decodeURIComponent(realUrl);
+                                }
+                            }
+                            
+                            // ✅ ניקוי פרמטרים מיותרים (גם מקישורים ישירים)
+                            try {
+                                const cleanUrl = new URL(actualLink);
+                                actualLink = cleanUrl.origin + cleanUrl.pathname;
+                            } catch(e) {}
+
+                            // ✅ חילוץ מקור נקי
+                            try {
+                                const sourceUrl = new URL(actualLink);
+                                source = sourceUrl.hostname.replace(/^(www\.)?/, '');
+                            } catch(e) {}
+                            
+                        } catch (e) {
+                            console.error(`⚠️ URL parsing error for "${item.link?.substring(0,100)}...": ${e.message}`);
+                        }
+
+                        // ✅ ניקוי title/snippet - בטוח לכל סוגי הנתונים
+                        const rawTitle = item.title || '';
+                        const cleanTitle = typeof rawTitle === 'string' 
+                            ? rawTitle.replace(/<[^>]*>/g, '').trim() 
+                            : String(rawTitle).trim();
+
+                        const rawSnippet = item.contentSnippet || item.title || '';
+                        const cleanSnippet = typeof rawSnippet === 'string' 
+                            ? rawSnippet.replace(/<[^>]*>/g, '').substring(0, 200).trim()
+                            : String(rawSnippet).substring(0, 200).trim();
 
                         return {
                             title: cleanTitle,
-                            link: item.link || '',
-                            source: source,
+                            link: actualLink,           // ✅ קישור נקי
+                            source: source,              // ✅ מקור אמיתי
                             img: item.enclosure?.url || null,
                             pubDate: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
                             snippet: cleanSnippet

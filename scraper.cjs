@@ -1,12 +1,46 @@
 const admin = require("firebase-admin");
 const axios = require('axios');
+const Parser = require('rss-parser');
 
 const APP_ID = 'euromix-pro-v4-wp';
-const WP_API_URL = "https://www.euromix.co.il/wp-json/wp/v2/posts";
 const MAX_AGE_HOURS = 48;
 const KEEP_NEW_LIMIT = 300;
 const MAX_NEW_DAYS = 2;
 const KEEP_WORK_DAYS = 30;
+
+const GOOGLE_ALERT_FEEDS = [
+    "https://www.google.com/alerts/feeds/06246568100549944052/795343927474894566",
+    "https://www.google.com/alerts/feeds/06246568100549944052/10733370037108467223",
+    "https://www.google.com/alerts/feeds/06246568100549944052/557423423509538553",
+    "https://www.google.com/alerts/feeds/06246568100549944052/17088384328630950891",
+    "https://www.google.com/alerts/feeds/06246568100549944052/12440077986784934032",
+    "https://www.google.com/alerts/feeds/06246568100549944052/11474771711481293980",
+    "https://www.google.com/alerts/feeds/06246568100549944052/11802422789544832213",
+    "https://www.google.com/alerts/feeds/06246568100549944052/7566706820455729623",
+    "https://www.google.com/alerts/feeds/06246568100549944052/13681067940937661426",
+    "https://www.google.com/alerts/feeds/06246568100549944052/4200751291116562980",
+    "https://www.google.com/alerts/feeds/06246568100549944052/14935090722471529293",
+    "https://www.google.com/alerts/feeds/06246568100549944052/10277104388747642774",
+    "https://www.google.com/alerts/feeds/06246568100549944052/3312570918171874401",
+    "https://www.google.com/alerts/feeds/06246568100549944052/8332233932659767354",
+    "https://www.google.com/alerts/feeds/06246568100549944052/16097641400209404195",
+    "https://www.google.com/alerts/feeds/06246568100549944052/16097641400209405898",
+    "https://www.google.com/alerts/feeds/06246568100549944052/16097641400209407660",
+    "https://www.google.com/alerts/feeds/06246568100549944052/16097641400209406321",
+    "https://www.google.com/alerts/feeds/06246568100549944052/12394802389823905697",
+    "https://www.google.com/alerts/feeds/06246568100549944052/12394802389823902745",
+    "https://www.google.com/alerts/feeds/06246568100549944052/12394802389823904210",
+    "https://www.google.com/alerts/feeds/06246568100549944052/6704048547094928896",
+    "https://www.google.com/alerts/feeds/06246568100549944052/6704048547094928765",
+    "https://www.google.com/alerts/feeds/06246568100549944052/6704048547094927573",
+    "https://www.google.com/alerts/feeds/06246568100549944052/12089369468476994837",
+    "https://www.google.com/alerts/feeds/06246568100549944052/12089369468476994087",
+    "https://www.google.com/alerts/feeds/06246568100549944052/1831928013655623988",
+    "https://www.google.com/alerts/feeds/06246568100549944052/14198917735619385905",
+    "https://www.google.com/alerts/feeds/06246568100549944052/3589006963503121351",
+    "https://www.google.com/alerts/feeds/06246568100549944052/12383218810042123539",
+    "https://www.google.com/alerts/feeds/06246568100549944052/16244574932590237425"
+];
 
 function initFirebase() {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -29,60 +63,69 @@ function initFirebase() {
 const db = initFirebase();
 
 async function run() {
-    console.log("🚀 Starting scraper with WordPress REST API...");
+    console.log("🚀 Starting scraper with Google Alerts RSS feeds...");
+    console.log(`📡 Processing ${GOOGLE_ALERT_FEEDS.length} RSS feeds...`);
     
     try {
         await updateStatusTime();
 
-        console.log(`🔗 Fetching data from ${WP_API_URL}...`);
-        
-        const response = await axios.get(WP_API_URL, {
-            params: {
-                per_page: 100,
-                orderby: 'date',
-                order: 'desc',
-                _embed: true
-            },
+        const parser = new Parser({
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
             },
             timeout: 30000
         });
 
-        console.log(`📦 Found ${response.data.length} posts`);
+        let allArticles = [];
+        let successCount = 0;
+        let failCount = 0;
 
-        if (!response.data || response.data.length === 0) {
-            console.log("⚠️ API returned empty");
+        for (const feedUrl of GOOGLE_ALERT_FEEDS) {
+            try {
+                console.log(`🔗 Fetching feed ${successCount + failCount + 1}/${GOOGLE_ALERT_FEEDS.length}...`);
+                const feed = await parser.parseURL(feedUrl);
+                
+                if (feed.items && feed.items.length > 0) {
+                    const articles = feed.items.map(item => {
+                        let source = "Unknown";
+                        try { 
+                            const urlObj = new URL(item.link); 
+                            source = urlObj.hostname.replace('www.', ''); 
+                        } catch (e) {}
+
+                        return {
+                            title: item.title || '',
+                            link: item.link || '',
+                            source: source,
+                            img: item.enclosure?.url || null,
+                            pubDate: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
+                            snippet: item.contentSnippet || item.title || ''
+                        };
+                    });
+                    
+                    allArticles.push(...articles);
+                    successCount++;
+                    console.log(`✅ Found ${articles.length} items`);
+                } else {
+                    successCount++;
+                    console.log(`⚠️ Feed empty`);
+                }
+            } catch (error) {
+                failCount++;
+                console.error(`❌ Feed error: ${error.message}`);
+            }
+        }
+
+        console.log(`📊 Feeds processed: ${successCount} success, ${failCount} failed`);
+        console.log(`📦 Total items collected: ${allArticles.length}`);
+
+        if (allArticles.length === 0) {
+            console.log("⚠️ No articles found");
             process.exit(0);
         }
 
-        const articles = response.data.map(post => {
-            let source = "Unknown";
-            try { 
-                const urlObj = new URL(post.link); 
-                source = urlObj.hostname.replace('www.', ''); 
-            } catch (e) {}
-
-            let img = null;
-            if (post._embedded?.['wp:featuredmedia']?.[0]?.source_url) {
-                img = post._embedded['wp:featuredmedia'][0].source_url;
-            }
-
-            const snippet = post.excerpt?.rendered 
-                ? post.excerpt.rendered.replace(/<[^>]*>/g, '').substring(0, 200)
-                : post.title.rendered;
-
-            return {
-                title: post.title.rendered || '',
-                link: post.link || '',
-                source: source,
-                img: img,
-                pubDate: post.date ? new Date(post.date).toISOString() : new Date().toISOString(),
-                snippet: snippet
-            };
-        });
-
-        const uniqueArticles = Array.from(new Map(articles.map(item => [item.link, item])).values());
+        const uniqueArticles = Array.from(new Map(allArticles.map(item => [item.link, item])).values());
+        console.log(`🔎 Unique articles: ${uniqueArticles.length}`);
         
         const now = new Date();
         const cutoffTime = new Date(now.getTime() - (MAX_AGE_HOURS * 60 * 60 * 1000));
@@ -91,7 +134,7 @@ async function run() {
             return pubDate >= cutoffTime;
         });
         
-        console.log(`🔎 ${uniqueArticles.length} total, ${recentArticles.length} from last ${MAX_AGE_HOURS}h.`);
+        console.log(`🔎 Recent articles (${MAX_AGE_HOURS}h): ${recentArticles.length}`);
 
         const articlesCollection = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
 
@@ -140,10 +183,6 @@ async function run() {
 
     } catch (e) {
         console.error("❌ Error:", e.message);
-        if (e.response) {
-            console.error("Response status:", e.response.status);
-            console.error("Response data:", JSON.stringify(e.response.data).substring(0, 200));
-        }
         console.error("Stack:", e.stack);
         process.exit(1);
     }

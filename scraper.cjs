@@ -9,7 +9,7 @@ const KEEP_NEW_HOURS = 48;          // כתבות new - 48 שעות
 
 const GOOGLE_ALERT_FEEDS = [
     "https://www.google.com/alerts/feeds/15835567105207766825/5913675776665511822",
-    "https://www.reddit.com/r/eurovision/new.rss",
+    "https://rsshub.app/reddit/subreddit/eurovision/new",
     "https://www.google.com/alerts/feeds/15835567105207766825/14323053635267839718",
     "https://www.google.com/alerts/feeds/15835567105207766825/3774609703160026695",
     "https://www.google.com/alerts/feeds/15835567105207766825/7909243822372747901",

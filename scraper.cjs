@@ -131,12 +131,14 @@ async function run() {
     try {
         await updateStatusTime();
 
-        const parser = new Parser({
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-            },
-            timeout: 30000
-        });
+const parser = new Parser({
+    headers: {
+        // רדיט דורשת User-Agent ייחודי עם פרטי מפתח
+        'User-Agent': 'NodeJS:euromix-scraper:v1.0 (by /u/Fluffy_Care7919)',
+        'Accept': 'application/rss+xml, application/xml, text/xml'
+    },
+    timeout: 30000
+});
 
         let allArticles = [];
         let successCount = 0;

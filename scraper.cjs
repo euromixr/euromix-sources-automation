@@ -1,11 +1,14 @@
 const admin = require("firebase-admin");
-const axios = require('axios');
-const Parser = require('rss-parser');
+const axios = require("axios");
+const Parser = require("rss-parser");
 
-const APP_ID = 'euromix-pro-v4-wp';
-const MAX_AGE_HOURS = 24;           // 24 שעות ייבוא
-const KEEP_WORK_DAYS = 30;          // כתבות בתהליך - 30 יום
-const KEEP_NEW_HOURS = 48;          // כתבות new - 48 שעות
+const APP_ID = "euromix-pro-v4-wp";
+const MAX_AGE_HOURS = 24;
+const KEEP_WORK_DAYS = 30;
+const KEEP_NEW_HOURS = 48;
+
+const WP_IMPORT_URL = process.env.WP_IMPORT_URL || "https://euromix.co.il/wp-json/euromix/v1/import-source-item";
+const WP_IMPORT_SECRET = process.env.WP_IMPORT_SECRET || "";
 
 const GOOGLE_ALERT_FEEDS = [
     "https://www.google.com/alerts/feeds/15835567105207766825/5913675776665511822",
@@ -101,18 +104,19 @@ const GOOGLE_ALERT_FEEDS = [
     "https://www.google.com/alerts/feeds/15835567105207766825/4171072731871609982"
 ];
 
-
-
 function initFirebase() {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
     if (!serviceAccountRaw) {
         console.error("❌ FIREBASE_SERVICE_ACCOUNT missing.");
         process.exit(1);
     }
+
     try {
         const serviceAccount = JSON.parse(serviceAccountRaw);
         if (!admin.apps.length) {
-            admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+            admin.initializeApp({
+                credential: admin.credential.cert(serviceAccount),
+            });
         }
         return admin.firestore();
     } catch (error) {
@@ -123,24 +127,139 @@ function initFirebase() {
 
 const db = initFirebase();
 
+function normalizeUrl(rawUrl) {
+    if (!rawUrl) return "";
+
+    let actualLink = String(rawUrl).trim();
+
+    try {
+        if (actualLink.includes("google.com/url")) {
+            const urlObj = new URL(actualLink);
+            const realUrl = urlObj.searchParams.get("url");
+            if (realUrl) {
+                actualLink = decodeURIComponent(realUrl);
+            }
+        }
+    } catch (_) {}
+
+    try {
+        const cleanUrl = new URL(actualLink);
+        cleanUrl.hash = "";
+        cleanUrl.search = "";
+        return cleanUrl.origin + cleanUrl.pathname;
+    } catch (_) {
+        return actualLink;
+    }
+}
+
+function extractSource(link) {
+    try {
+        return new URL(link).hostname.replace(/^(www\.)?/, "");
+    } catch (_) {
+        return "Unknown";
+    }
+}
+
+function cleanText(value, maxLength = null) {
+    const text = typeof value === "string" ? value : String(value || "");
+    const cleaned = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    return maxLength ? cleaned.slice(0, maxLength).trim() : cleaned;
+}
+
+function toIsoDate(value) {
+    if (!value) return new Date().toISOString();
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+}
+
+function mapFeedItem(item) {
+    const link = normalizeUrl(item.link || "");
+    return {
+        title: cleanText(item.title || "", 500),
+        link,
+        source: extractSource(link),
+        img: item.enclosure?.url || null,
+        pubDate: toIsoDate(item.pubDate),
+        snippet: cleanText(item.contentSnippet || item.title || "", 200),
+    };
+}
+
+async function pushArticleToWordPress(article) {
+    if (!WP_IMPORT_SECRET) {
+        throw new Error("WP_IMPORT_SECRET missing");
+    }
+
+    const payload = {
+        title: article.title || "",
+        link: article.link || "",
+        source: article.source || "",
+        img: article.img || "",
+        pubDate: article.pubDate || "",
+        snippet: article.snippet || "",
+        status: "new",
+        flagged: false,
+        processing: false,
+        assignedTo: "",
+        isCustom: false,
+        isManual: false,
+    };
+
+    const response = await axios.post(WP_IMPORT_URL, payload, {
+        timeout: 30000,
+        headers: {
+            "Content-Type": "application/json",
+            "x-euromix-secret": WP_IMPORT_SECRET,
+        },
+        validateStatus: () => true,
+    });
+
+    if (response.status < 200 || response.status >= 300 || !response.data?.ok) {
+        throw new Error(`WP import failed (${response.status}): ${JSON.stringify(response.data)}`);
+    }
+
+    return response.data;
+}
+
+async function pushArticlesToWordPress(articles) {
+    if (!articles.length) {
+        console.log("🌐 No new articles to push to WordPress.");
+        return { success: 0, failed: 0 };
+    }
+
+    let success = 0;
+    let failed = 0;
+
+    for (const article of articles) {
+        try {
+            const result = await pushArticleToWordPress(article);
+            success++;
+            console.log(`🌐 WP imported: ${article.link} -> ${result.received || "ok"}`);
+        } catch (error) {
+            failed++;
+            console.error(`❌ WP import failed for ${article.link}: ${error.message}`);
+        }
+    }
+
+    return { success, failed };
+}
+
 async function run() {
     console.log("🚀 Starting scraper with Google Alerts RSS feeds...");
     console.log(`📡 Processing ${GOOGLE_ALERT_FEEDS.length} RSS feeds...`);
     console.log(`⏰ Importing articles from last ${MAX_AGE_HOURS} hours`);
-    
+
     try {
         await updateStatusTime();
 
-const parser = new Parser({
-    headers: {
-        // רדיט דורשת User-Agent ייחודי עם פרטי מפתח
-        'User-Agent': 'NodeJS:euromix-scraper:v1.0 (by /u/Fluffy_Care7919)',
-        'Accept': 'application/rss+xml, application/xml, text/xml'
-    },
-    timeout: 30000
-});
+        const parser = new Parser({
+            headers: {
+                "User-Agent": "NodeJS:euromix-scraper:v1.1 (by /u/Fluffy_Care7919)",
+                "Accept": "application/rss+xml, application/xml, text/xml",
+            },
+            timeout: 30000,
+        });
 
-        let allArticles = [];
+        const allArticles = [];
         let successCount = 0;
         let failCount = 0;
 
@@ -148,66 +267,15 @@ const parser = new Parser({
             try {
                 console.log(`🔗 Fetching feed ${successCount + failCount + 1}/${GOOGLE_ALERT_FEEDS.length}...`);
                 const feed = await parser.parseURL(feedUrl);
-                
+
                 if (feed.items && feed.items.length > 0) {
-                    const articles = feed.items.map(item => {
-                        // ✅ חילוץ Google redirect URL + ניקוי מלא
-                        let actualLink = item.link || '';
-                        let source = "Unknown";
-
-                        try {
-                            // חילוץ Google redirect URL
-                            if (actualLink.includes('google.com/url')) {
-                                const urlObj = new URL(actualLink);
-                                const realUrl = urlObj.searchParams.get('url');
-                                if (realUrl) {
-                                    actualLink = decodeURIComponent(realUrl);
-                                }
-                            }
-                            
-                            // ✅ ניקוי פרמטרים מיותרים (גם מקישורים ישירים)
-                            try {
-                                const cleanUrl = new URL(actualLink);
-                                actualLink = cleanUrl.origin + cleanUrl.pathname;
-                            } catch(e) {}
-
-                            // ✅ חילוץ מקור נקי
-                            try {
-                                const sourceUrl = new URL(actualLink);
-                                source = sourceUrl.hostname.replace(/^(www\.)?/, '');
-                            } catch(e) {}
-                            
-                        } catch (e) {
-                            console.error(`⚠️ URL parsing error for "${item.link?.substring(0,100)}...": ${e.message}`);
-                        }
-
-                        // ✅ ניקוי title/snippet - בטוח לכל סוגי הנתונים
-                        const rawTitle = item.title || '';
-                        const cleanTitle = typeof rawTitle === 'string' 
-                            ? rawTitle.replace(/<[^>]*>/g, '').trim() 
-                            : String(rawTitle).trim();
-
-                        const rawSnippet = item.contentSnippet || item.title || '';
-                        const cleanSnippet = typeof rawSnippet === 'string' 
-                            ? rawSnippet.replace(/<[^>]*>/g, '').substring(0, 200).trim()
-                            : String(rawSnippet).substring(0, 200).trim();
-
-                        return {
-                            title: cleanTitle,
-                            link: actualLink,           // ✅ קישור נקי
-                            source: source,              // ✅ מקור אמיתי
-                            img: item.enclosure?.url || null,
-                            pubDate: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
-                            snippet: cleanSnippet
-                        };
-                    });
-                    
+                    const articles = feed.items.map(mapFeedItem).filter(a => a.title && a.link);
                     allArticles.push(...articles);
                     successCount++;
                     console.log(`✅ Found ${articles.length} items`);
                 } else {
                     successCount++;
-                    console.log(`⚠️ Feed empty`);
+                    console.log("⚠️ Feed empty");
                 }
             } catch (error) {
                 failCount++;
@@ -223,23 +291,21 @@ const parser = new Parser({
             process.exit(0);
         }
 
-        // ✅ זיהוי כפילויות - לפי link
         const uniqueArticles = Array.from(new Map(allArticles.map(item => [item.link, item])).values());
         console.log(`🔎 Unique articles (after dedup): ${uniqueArticles.length}`);
-        
-        // ✅ רק מ-24 שעות אחרונות
+
         const now = new Date();
         const cutoffTime = new Date(now.getTime() - (MAX_AGE_HOURS * 60 * 60 * 1000));
-        const recentArticles = uniqueArticles.filter(article => {
-            const pubDate = new Date(article.pubDate);
-            return pubDate >= cutoffTime;
-        });
-        
+        const recentArticles = uniqueArticles.filter(article => new Date(article.pubDate) >= cutoffTime);
         console.log(`🔎 Recent articles (${MAX_AGE_HOURS}h): ${recentArticles.length}`);
 
-        const articlesCollection = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
+        const articlesCollection = db
+            .collection("artifacts")
+            .doc(APP_ID)
+            .collection("public")
+            .doc("data")
+            .collection("articles");
 
-        // ✅ בדיקת כפילויות מול Firestore
         const linksToCheck = recentArticles.map(a => a.link);
         const existingLinks = new Set();
         let totalReads = 0;
@@ -247,7 +313,7 @@ const parser = new Parser({
         console.log(`🔍 Checking ${linksToCheck.length} links for duplicates...`);
         for (let i = 0; i < linksToCheck.length; i += 10) {
             const batch = linksToCheck.slice(i, i + 10);
-            const snapshot = await articlesCollection.where('link', 'in', batch).select('link').get();
+            const snapshot = await articlesCollection.where("link", "in", batch).select("link").get();
             totalReads += snapshot.size;
             snapshot.docs.forEach(doc => existingLinks.add(doc.data().link));
         }
@@ -255,7 +321,6 @@ const parser = new Parser({
         const newArticles = recentArticles.filter(a => !existingLinks.has(a.link));
         console.log(`📦 Checked ${linksToCheck.length} links (${totalReads} reads), found ${newArticles.length} new articles`);
 
-        // ✅ אין הגבלה על מספר כתבות לייבוא
         if (newArticles.length > 0) {
             const batch = db.batch();
             newArticles.forEach(article => {
@@ -263,7 +328,7 @@ const parser = new Parser({
                 batch.set(docRef, {
                     ...article,
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                    status: 'new',
+                    status: "new",
                     flagged: false,
                     publishedSite: false,
                     publishedSocialHe: false,
@@ -271,19 +336,21 @@ const parser = new Parser({
                     translationComplete: false,
                     assignedTo: null,
                     isCustom: false,
-                    hasCountedWriting: false
+                    hasCountedWriting: false,
                 });
             });
             await batch.commit();
-            console.log(`💾 Saved ${newArticles.length} articles.`);
+            console.log(`💾 Saved ${newArticles.length} articles to Firestore.`);
         } else {
-            console.log("👌 No new articles.");
+            console.log("👌 No new articles for Firestore.");
         }
+
+        const wpResult = await pushArticlesToWordPress(newArticles);
+        console.log(`🌐 WordPress import summary: ${wpResult.success} success, ${wpResult.failed} failed`);
 
         await cleanupSmart();
         await updateStatusTime();
         console.log("🎉 Scraper finished successfully!");
-
     } catch (e) {
         console.error("❌ Error:", e.message);
         console.error("Stack:", e.stack);
@@ -293,13 +360,18 @@ const parser = new Parser({
 
 async function cleanupSmart() {
     console.log("🧹 Smart cleanup...");
+
     try {
-        const articlesRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
-        
-        // ✅ כתבות 'new' - מחיקה לאחר 48 שעות
-        const allNew = await articlesRef.where('status', '==', 'new').get();
+        const articlesRef = db
+            .collection("artifacts")
+            .doc(APP_ID)
+            .collection("public")
+            .doc("data")
+            .collection("articles");
+
+        const allNew = await articlesRef.where("status", "==", "new").get();
         console.log(`📊 ${allNew.size} articles with status 'new'.`);
-        
+
         if (!allNew.empty) {
             const batch = db.batch();
             let deleteCount = 0;
@@ -309,7 +381,7 @@ async function cleanupSmart() {
             allNew.docs.forEach(doc => {
                 const data = doc.data();
                 const pubDate = data.pubDate ? new Date(data.pubDate) : new Date(0);
-                
+
                 if (pubDate < keepNewCutoff) {
                     batch.delete(doc.ref);
                     deleteCount++;
@@ -324,11 +396,10 @@ async function cleanupSmart() {
             }
         }
 
-        // ✅ כתבות בתהליך (לא 'new') - מחיקה לאחר 30 יום
         console.log("🧹 Checking articles in process (not 'new')...");
-        const allArticles = await articlesRef.where('status', '!=', 'new').get();
+        const allArticles = await articlesRef.where("status", "!=", "new").get();
         console.log(`📊 ${allArticles.size} articles in process.`);
-        
+
         if (!allArticles.empty) {
             const workBatch = db.batch();
             let workDeleteCount = 0;
@@ -337,7 +408,7 @@ async function cleanupSmart() {
             allArticles.docs.forEach(doc => {
                 const data = doc.data();
                 const createdDate = data.createdAt ? data.createdAt.toDate() : new Date(0);
-                
+
                 if (createdDate < thirtyDaysAgo) {
                     workBatch.delete(doc.ref);
                     workDeleteCount++;
@@ -352,9 +423,13 @@ async function cleanupSmart() {
             }
         }
 
-        const totalCount = await articlesRef.count().get();
-        console.log(`📊 Total articles in DB: ${totalCount.data().count}`);
-
+        try {
+            const totalCount = await articlesRef.count().get();
+            console.log(`📊 Total articles in DB: ${totalCount.data().count}`);
+        } catch (_) {
+            const snapshot = await articlesRef.get();
+            console.log(`📊 Total articles in DB: ${snapshot.size}`);
+        }
     } catch (error) {
         console.error("⚠️ Cleanup error:", error.message);
     }
@@ -362,8 +437,20 @@ async function cleanupSmart() {
 
 async function updateStatusTime() {
     try {
-        await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('settings').doc('status').set({ lastScrape: admin.firestore.Timestamp.now() }, { merge: true });
-    } catch(e) {}
+        await db
+            .collection("artifacts")
+            .doc(APP_ID)
+            .collection("public")
+            .doc("data")
+            .collection("settings")
+            .doc("status")
+            .set(
+                {
+                    lastScrape: admin.firestore.Timestamp.now(),
+                },
+                { merge: true }
+            );
+    } catch (_) {}
 }
 
 run();

@@ -30,6 +30,8 @@ jobs:
       - name: Run Scraper
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          WP_API_ROOT: ${{ secrets.WP_API_ROOT }}
+          EUROMIX_IMPORT_SECRET: ${{ secrets.EUROMIX_IMPORT_SECRET }}
         run: |
           echo "🚀 Starting scraper at $(date)"
           node scraper.cjs

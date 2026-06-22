@@ -1,10 +1,15 @@
 {
   "name": "euromix-scraper",
   "version": "1.0.0",
+  "description": "Daily scraper for Euromix sources",
+  "main": "scraper.cjs",
   "type": "commonjs",
+  "scripts": {
+    "start": "node scraper.cjs"
+  },
   "dependencies": {
-    "firebase-admin": "^12.0.0",
     "axios": "^1.6.0",
+    "firebase-admin": "^11.11.0",
     "rss-parser": "^3.13.0"
   }
 }

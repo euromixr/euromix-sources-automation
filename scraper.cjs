@@ -7,6 +7,10 @@ const MAX_AGE_HOURS = 24;           // 24 שעות ייבוא
 const KEEP_WORK_DAYS = 30;          // כתבות בתהליך - 30 יום
 const KEEP_NEW_HOURS = 48;          // כתבות new - 48 שעות
 
+// הגדרות WordPress API (ייקרא מתוך Environment Variables של GitHub Actions במידה וקיים)
+const WP_API_ROOT = process.env.WP_API_ROOT || "https://euro-mix.co.il/wp-json";
+const EUROMIX_IMPORT_SECRET = process.env.EUROMIX_IMPORT_SECRET || "my-test-secret-123";
+
 const GOOGLE_ALERT_FEEDS = [
     "https://www.google.com/alerts/feeds/15835567105207766825/5913675776665511822",
     "https://corsproxy.io/?https://www.reddit.com/r/eurovision/new.rss",
@@ -101,8 +105,6 @@ const GOOGLE_ALERT_FEEDS = [
     "https://www.google.com/alerts/feeds/15835567105207766825/4171072731871609982"
 ];
 
-
-
 function initFirebase() {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
     if (!serviceAccountRaw) {
@@ -131,14 +133,13 @@ async function run() {
     try {
         await updateStatusTime();
 
-const parser = new Parser({
-    headers: {
-        // רדיט דורשת User-Agent ייחודי עם פרטי מפתח
-        'User-Agent': 'NodeJS:euromix-scraper:v1.0 (by /u/Fluffy_Care7919)',
-        'Accept': 'application/rss+xml, application/xml, text/xml'
-    },
-    timeout: 30000
-});
+        const parser = new Parser({
+            headers: {
+                'User-Agent': 'NodeJS:euromix-scraper:v1.0 (by /u/Fluffy_Care7919)',
+                'Accept': 'application/rss+xml, application/xml, text/xml'
+            },
+            timeout: 30000
+        });
 
         let allArticles = [];
         let successCount = 0;
@@ -151,7 +152,6 @@ const parser = new Parser({
 
                 if (feed.items && feed.items.length > 0) {
                     const articles = feed.items.map(item => {
-                        // ✅ חילוץ Google redirect URL + ניקוי מלא
                         let actualLink = item.link || '';
                         let source = "Unknown";
 
@@ -165,13 +165,13 @@ const parser = new Parser({
                                 }
                             }
 
-                            // ✅ ניקוי פרמטרים מיותרים (גם מקישורים ישירים)
+                            // ניקוי פרמטרים מיותרים מהקישור
                             try {
                                 const cleanUrl = new URL(actualLink);
                                 actualLink = cleanUrl.origin + cleanUrl.pathname;
                             } catch(e) {}
 
-                            // ✅ חילוץ מקור נקי
+                            // חילוץ מקור נקי
                             try {
                                 const sourceUrl = new URL(actualLink);
                                 source = sourceUrl.hostname.replace(/^(www\.)?/, '');
@@ -181,7 +181,6 @@ const parser = new Parser({
                             console.error(`⚠️ URL parsing error for "${item.link?.substring(0,100)}...": ${e.message}`);
                         }
 
-                        // ✅ ניקוי title/snippet - בטוח לכל סוגי הנתונים
                         const rawTitle = item.title || '';
                         const cleanTitle = typeof rawTitle === 'string' 
                             ? rawTitle.replace(/<[^>]*>/g, '').trim() 
@@ -194,8 +193,8 @@ const parser = new Parser({
 
                         return {
                             title: cleanTitle,
-                            link: actualLink,           // ✅ קישור נקי
-                            source: source,              // ✅ מקור אמיתי
+                            link: actualLink,
+                            source: source,
                             img: item.enclosure?.url || null,
                             pubDate: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
                             snippet: cleanSnippet
@@ -204,10 +203,8 @@ const parser = new Parser({
 
                     allArticles.push(...articles);
                     successCount++;
-                    console.log(`✅ Found ${articles.length} items`);
                 } else {
                     successCount++;
-                    console.log(`⚠️ Feed empty`);
                 }
             } catch (error) {
                 failCount++;
@@ -215,48 +212,39 @@ const parser = new Parser({
             }
         }
 
-        console.log(`📊 Feeds processed: ${successCount} success, ${failCount} failed`);
-        console.log(`📦 Total items collected: ${allArticles.length}`);
-
-        if (allArticles.length === 0) {
-            console.log("⚠️ No articles found");
-            process.exit(0);
-        }
-
-        // ✅ זיהוי כפילויות - לפי link
         const uniqueArticles = Array.from(new Map(allArticles.map(item => [item.link, item])).values());
-        console.log(`🔎 Unique articles (after dedup): ${uniqueArticles.length}`);
+        console.log(`🔎 נמצאו ${uniqueArticles.length} כתבות חיצוניות ייחודיות.`);
 
-        // ✅ רק מ-24 שעות אחרונות
+        // סינון לפי שעות הייבוא המוגדרות (קבוע MAX_AGE_HOURS)
         const now = new Date();
         const cutoffTime = new Date(now.getTime() - (MAX_AGE_HOURS * 60 * 60 * 1000));
-        const recentArticles = uniqueArticles.filter(article => {
-            const pubDate = new Date(article.pubDate);
-            return pubDate >= cutoffTime;
-        });
+        const recentArticles = uniqueArticles.filter(article => new Date(article.pubDate) >= cutoffTime);
+        console.log(`🔎 סינון: ${recentArticles.length} כתבות ב- ${MAX_AGE_HOURS} השעות האחרונות.`);
 
-        console.log(`🔎 Recent articles (${MAX_AGE_HOURS}h): ${recentArticles.length}`);
+        // ==========================================
+        // מנגנון 1: בדיקת כפילויות ושמירה ל-Firestore
+        // ==========================================
+        const articlesCollection = db.collection('artifacts').doc(APP_ID).collection('public').document ? null : db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
+        let newArticles = [];
 
-        const articlesCollection = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
+        if (recentArticles.length > 0 && articlesCollection) {
+            const linksToCheck = recentArticles.map(a => a.link);
+            const existingLinks = new Set();
+            let totalReads = 0;
 
-        // ✅ בדיקת כפילויות מול Firestore
-        const linksToCheck = recentArticles.map(a => a.link);
-        const existingLinks = new Set();
-        let totalReads = 0;
+            console.log(`🔍 Checking ${linksToCheck.length} links for duplicates in Firestore...`);
+            for (let i = 0; i < linksToCheck.length; i += 10) {
+                const batch = linksToCheck.slice(i, i + 10);
+                const snapshot = await articlesCollection.where('link', 'in', batch).select('link').get();
+                totalReads += snapshot.size;
+                snapshot.docs.forEach(doc => existingLinks.add(doc.data().link));
+            }
 
-        console.log(`🔍 Checking ${linksToCheck.length} links for duplicates...`);
-        for (let i = 0; i < linksToCheck.length; i += 10) {
-            const batch = linksToCheck.slice(i, i + 10);
-            const snapshot = await articlesCollection.where('link', 'in', batch).select('link').get();
-            totalReads += snapshot.size;
-            snapshot.docs.forEach(doc => existingLinks.add(doc.data().link));
+            newArticles = recentArticles.filter(a => !existingLinks.has(a.link));
+            console.log(`📦 Checked ${linksToCheck.length} links in Firestore, found ${newArticles.length} new articles`);
         }
 
-        const newArticles = recentArticles.filter(a => !existingLinks.has(a.link));
-        console.log(`📦 Checked ${linksToCheck.length} links (${totalReads} reads), found ${newArticles.length} new articles`);
-
-        // ✅ אין הגבלה על מספר כתבות לייבוא
-        if (newArticles.length > 0) {
+        if (newArticles.length > 0 && articlesCollection) {
             const batch = db.batch();
             newArticles.forEach(article => {
                 const docRef = articlesCollection.doc();
@@ -271,34 +259,96 @@ const parser = new Parser({
                     translationComplete: false,
                     assignedTo: null,
                     isCustom: false,
-                    hasCountedWriting: false
+                    hasCountedWriting: false,
+                    isDeleted: false
                 });
             });
             await batch.commit();
-            console.log(`💾 Saved ${newArticles.length} articles.`);
+            console.log(`💾 Saved ${newArticles.length} articles to Firestore.`);
         } else {
-            console.log("👌 No new articles.");
+            console.log("👌 No new articles for Firestore.");
         }
 
+        // ==========================================
+        // מנגנון 2: בדיקת כפילויות ושמירה ל-WordPress Custom DB Table (חדש)
+        // ==========================================
+        console.log("🔍 Checking duplicates and importing to WordPress Database...");
+        let wpExistingLinks = new Set();
+        try {
+            const wpResponse = await axios.get(`${WP_API_ROOT}/euromix/v1/get-source-items`);
+            if (Array.isArray(wpResponse.data)) {
+                wpResponse.data.forEach(item => {
+                    if (item.link) wpExistingLinks.add(item.link);
+                });
+            }
+        } catch (e) {
+            console.warn("⚠️ WordPress read failed (CORS/Network), continuing with fallback database checks:", e.message);
+        }
+
+        const newWPArticles = recentArticles.filter(a => !wpExistingLinks.has(a.link));
+        console.log(`📦 WordPress: Checked ${recentArticles.length} links, found ${newWPArticles.length} new articles.`);
+
+        if (newWPArticles.length > 0) {
+            let wpSavedCount = 0;
+            for (const article of newWPArticles) {
+                try {
+                    const res = await axios.post(`${WP_API_ROOT}/euromix/v1/import-source-item`, {
+                        ...article,
+                        status: 'new',
+                        flagged: false,
+                        publishedSite: false,
+                        publishedSocialHe: false,
+                        publishedSocialEn: false,
+                        translationComplete: false,
+                        assignedTo: null,
+                        isCustom: false,
+                        hasCountedWriting: false,
+                        isDeleted: false
+                    }, {
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'x-euromix-secret': EUROMIX_IMPORT_SECRET
+                        }
+                    });
+                    if (res.status === 200 && res.data.ok) {
+                        wpSavedCount++;
+                    }
+                } catch (err) {
+                    console.error(`⚠️ Error saving article to WordPress (${article.link}): ${err.message}`);
+                }
+            }
+            console.log(`💾 Saved ${wpSavedCount} articles directly to WordPress Table.`);
+
+            // עדכון מועד הסריקה האחרון בוורדפרס
+            try {
+                await axios.post(`${WP_API_ROOT}/euromix/v1/update-status`, {
+                    lastScrape: new Date().toISOString()
+                });
+            } catch(e) {}
+        } else {
+            console.log("👌 No new articles for WordPress Database.");
+        }
+
+        // ביצוע ניקוי חכם מקורי
         await cleanupSmart();
         await updateStatusTime();
         console.log("🎉 Scraper finished successfully!");
 
     } catch (e) {
-        console.error("❌ Error:", e.message);
+        console.error("❌ Error in run:", e.message);
         console.error("Stack:", e.stack);
         process.exit(1);
     }
 }
 
 async function cleanupSmart() {
-    console.log("🧹 Smart cleanup...");
+    console.log("🧹 Smart cleanup running...");
     try {
-        const articlesRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
+        const articlesCollection = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
 
-        // ✅ כתבות 'new' - מחיקה לאחר 48 שעות
-        const allNew = await articlesRef.where('status', '==', 'new').get();
-        console.log(`📊 ${allNew.size} articles with status 'new'.`);
+        // 1. כתבות 'new' - מחיקה לאחר 48 שעות (קבוע KEEP_NEW_HOURS)
+        const allNew = await articlesCollection.where('status', '==', 'new').get();
+        console.log(`📊 ${allNew.size} articles with status 'new' checked for cleanup.`);
 
         if (!allNew.empty) {
             const batch = db.batch();
@@ -320,14 +370,14 @@ async function cleanupSmart() {
                 await batch.commit();
                 console.log(`🗑️ Deleted ${deleteCount} 'new' articles older than ${KEEP_NEW_HOURS} hours.`);
             } else {
-                console.log(`✅ No 'new' articles older than ${KEEP_NEW_HOURS} hours.`);
+                console.log(`✅ No 'new' articles older than ${KEEP_NEW_HOURS} hours found.`);
             }
         }
 
-        // ✅ כתבות בתהליך (לא 'new') - מחיקה לאחר 30 יום
-        console.log("🧹 Checking articles in process (not 'new')...");
-        const allArticles = await articlesRef.where('status', '!=', 'new').get();
-        console.log(`📊 ${allArticles.size} articles in process.`);
+        // 2. כתבות בתהליך (לא 'new') - מחיקה לאחר 30 יום (קבוע KEEP_WORK_DAYS)
+        console.log("🧹 Checking articles in process (not 'new') for cleanup...");
+        const allArticles = await articlesCollection.where('status', '!=', 'new').get();
+        console.log(`📊 ${allArticles.size} articles in process checked for cleanup.`);
 
         if (!allArticles.empty) {
             const workBatch = db.batch();
@@ -348,12 +398,12 @@ async function cleanupSmart() {
                 await workBatch.commit();
                 console.log(`🗑️ Deleted ${workDeleteCount} articles in process older than ${KEEP_WORK_DAYS} days.`);
             } else {
-                console.log(`✅ No articles in process older than ${KEEP_WORK_DAYS} days.`);
+                console.log(`✅ No articles in process older than ${KEEP_WORK_DAYS} days found.`);
             }
         }
 
-        const totalCount = await articlesRef.count().get();
-        console.log(`📊 Total articles in DB: ${totalCount.data().count}`);
+        const totalCount = await articlesCollection.count().get();
+        console.log(`📊 Total articles in Firestore DB: ${totalCount.data().count}`);
 
     } catch (error) {
         console.error("⚠️ Cleanup error:", error.message);
@@ -362,8 +412,11 @@ async function cleanupSmart() {
 
 async function updateStatusTime() {
     try {
-        await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('settings').doc('status').set({ lastScrape: admin.firestore.Timestamp.now() }, { merge: true });
-    } catch(e) {}
+        const settingsRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('settings').doc('status');
+        await settingsRef.set({ lastScrape: admin.firestore.Timestamp.now() }, { merge: true });
+    } catch(e) {
+        console.error("⚠️ Failed to update Firestore last scrape time:", e.message);
+    }
 }
 
 run();

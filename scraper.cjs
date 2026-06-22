@@ -8,11 +8,15 @@ const parser = new Parser({
   }
 });
 
-const FEEDS = [
-  // דוגמא:
-  // process.env.GOOGLE_ALERT_RSS_1,
-  // process.env.GOOGLE_ALERT_RSS_2,
-].filter(Boolean);
+const FEEDS = Object.keys(process.env)
+  .filter(key => key.startsWith('GOOGLE_ALERT_RSS_'))
+  .sort((a, b) => {
+    const aNum = Number(a.split('_').pop()) || 0;
+    const bNum = Number(b.split('_').pop()) || 0;
+    return aNum - bNum;
+  })
+  .map(key => process.env[key])
+  .filter(Boolean);
 
 const HOURS_BACK = Number(process.env.HOURS_BACK || 24);
 const WP_BASE_URL = (process.env.WP_BASE_URL || '').replace(/\/$/, '');

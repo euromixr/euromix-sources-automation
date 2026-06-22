@@ -1,42 +1,144 @@
-name: EuroMix Scraper
+name: Scrape Sources
 
 on:
-  schedule:
-    - cron: '0 */2 * * *'
   workflow_dispatch:
+  schedule:
+    - cron: "0 */2 * * *"
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
-    concurrency:
-      group: euromix-scraper
-      cancel-in-progress: false
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout code
+      - name: 🚀 Starting scraper at $(date)
+        run: echo "🚀 Starting scraper at $(date)"
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 24
+          cache: "npm"
 
       - name: Install dependencies
-        run: |
-          npm install
-          npx playwright install chromium --with-deps
+        run: npm ci
 
       - name: Run scraper
         env:
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          WP_IMPORT_URL: ${{ secrets.WP_IMPORT_URL }}
-          WP_IMPORT_SECRET: ${{ secrets.WP_IMPORT_SECRET }}
-        run: |
-          echo "🚀 Starting scraper at $(date)"
-          node scraper.cjs
-          echo "✅ Finished scraper at $(date)"
+          # WordPress
+          WP_BASE_URL: ${{ secrets.WP_BASE_URL }}
+          WP_USERNAME: ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          WP_IMPORT_ENDPOINT: ${{ secrets.WP_IMPORT_ENDPOINT }}
 
-      - name: Notify on failure
+          # Scraper config
+          HOURS_BACK: "24"
+          IMPORT_CONCURRENCY: "3"
+          BETWEEN_REQUEST_DELAY_MS: "150"
+          REQUEST_TIMEOUT_MS: "30000"
+
+          # Google Alerts RSS Feeds
+          GOOGLE_ALERT_RSS_1: ${{ secrets.GOOGLE_ALERT_RSS_1 }}
+          GOOGLE_ALERT_RSS_2: ${{ secrets.GOOGLE_ALERT_RSS_2 }}
+          GOOGLE_ALERT_RSS_3: ${{ secrets.GOOGLE_ALERT_RSS_3 }}
+          GOOGLE_ALERT_RSS_4: ${{ secrets.GOOGLE_ALERT_RSS_4 }}
+          GOOGLE_ALERT_RSS_5: ${{ secrets.GOOGLE_ALERT_RSS_5 }}
+          GOOGLE_ALERT_RSS_6: ${{ secrets.GOOGLE_ALERT_RSS_6 }}
+          GOOGLE_ALERT_RSS_7: ${{ secrets.GOOGLE_ALERT_RSS_7 }}
+          GOOGLE_ALERT_RSS_8: ${{ secrets.GOOGLE_ALERT_RSS_8 }}
+          GOOGLE_ALERT_RSS_9: ${{ secrets.GOOGLE_ALERT_RSS_9 }}
+          GOOGLE_ALERT_RSS_10: ${{ secrets.GOOGLE_ALERT_RSS_10 }}
+          GOOGLE_ALERT_RSS_11: ${{ secrets.GOOGLE_ALERT_RSS_11 }}
+          GOOGLE_ALERT_RSS_12: ${{ secrets.GOOGLE_ALERT_RSS_12 }}
+          GOOGLE_ALERT_RSS_13: ${{ secrets.GOOGLE_ALERT_RSS_13 }}
+          GOOGLE_ALERT_RSS_14: ${{ secrets.GOOGLE_ALERT_RSS_14 }}
+          GOOGLE_ALERT_RSS_15: ${{ secrets.GOOGLE_ALERT_RSS_15 }}
+          GOOGLE_ALERT_RSS_16: ${{ secrets.GOOGLE_ALERT_RSS_16 }}
+          GOOGLE_ALERT_RSS_17: ${{ secrets.GOOGLE_ALERT_RSS_17 }}
+          GOOGLE_ALERT_RSS_18: ${{ secrets.GOOGLE_ALERT_RSS_18 }}
+          GOOGLE_ALERT_RSS_19: ${{ secrets.GOOGLE_ALERT_RSS_19 }}
+          GOOGLE_ALERT_RSS_20: ${{ secrets.GOOGLE_ALERT_RSS_20 }}
+          GOOGLE_ALERT_RSS_21: ${{ secrets.GOOGLE_ALERT_RSS_21 }}
+          GOOGLE_ALERT_RSS_22: ${{ secrets.GOOGLE_ALERT_RSS_22 }}
+          GOOGLE_ALERT_RSS_23: ${{ secrets.GOOGLE_ALERT_RSS_23 }}
+          GOOGLE_ALERT_RSS_24: ${{ secrets.GOOGLE_ALERT_RSS_24 }}
+          GOOGLE_ALERT_RSS_25: ${{ secrets.GOOGLE_ALERT_RSS_25 }}
+          GOOGLE_ALERT_RSS_26: ${{ secrets.GOOGLE_ALERT_RSS_26 }}
+          GOOGLE_ALERT_RSS_27: ${{ secrets.GOOGLE_ALERT_RSS_27 }}
+          GOOGLE_ALERT_RSS_28: ${{ secrets.GOOGLE_ALERT_RSS_28 }}
+          GOOGLE_ALERT_RSS_29: ${{ secrets.GOOGLE_ALERT_RSS_29 }}
+          GOOGLE_ALERT_RSS_30: ${{ secrets.GOOGLE_ALERT_RSS_30 }}
+          GOOGLE_ALERT_RSS_31: ${{ secrets.GOOGLE_ALERT_RSS_31 }}
+          GOOGLE_ALERT_RSS_32: ${{ secrets.GOOGLE_ALERT_RSS_32 }}
+          GOOGLE_ALERT_RSS_33: ${{ secrets.GOOGLE_ALERT_RSS_33 }}
+          GOOGLE_ALERT_RSS_34: ${{ secrets.GOOGLE_ALERT_RSS_34 }}
+          GOOGLE_ALERT_RSS_35: ${{ secrets.GOOGLE_ALERT_RSS_35 }}
+          GOOGLE_ALERT_RSS_36: ${{ secrets.GOOGLE_ALERT_RSS_36 }}
+          GOOGLE_ALERT_RSS_37: ${{ secrets.GOOGLE_ALERT_RSS_37 }}
+          GOOGLE_ALERT_RSS_38: ${{ secrets.GOOGLE_ALERT_RSS_38 }}
+          GOOGLE_ALERT_RSS_39: ${{ secrets.GOOGLE_ALERT_RSS_39 }}
+          GOOGLE_ALERT_RSS_40: ${{ secrets.GOOGLE_ALERT_RSS_40 }}
+          GOOGLE_ALERT_RSS_41: ${{ secrets.GOOGLE_ALERT_RSS_41 }}
+          GOOGLE_ALERT_RSS_42: ${{ secrets.GOOGLE_ALERT_RSS_42 }}
+          GOOGLE_ALERT_RSS_43: ${{ secrets.GOOGLE_ALERT_RSS_43 }}
+          GOOGLE_ALERT_RSS_44: ${{ secrets.GOOGLE_ALERT_RSS_44 }}
+          GOOGLE_ALERT_RSS_45: ${{ secrets.GOOGLE_ALERT_RSS_45 }}
+          GOOGLE_ALERT_RSS_46: ${{ secrets.GOOGLE_ALERT_RSS_46 }}
+          GOOGLE_ALERT_RSS_47: ${{ secrets.GOOGLE_ALERT_RSS_47 }}
+          GOOGLE_ALERT_RSS_48: ${{ secrets.GOOGLE_ALERT_RSS_48 }}
+          GOOGLE_ALERT_RSS_49: ${{ secrets.GOOGLE_ALERT_RSS_49 }}
+          GOOGLE_ALERT_RSS_50: ${{ secrets.GOOGLE_ALERT_RSS_50 }}
+          GOOGLE_ALERT_RSS_51: ${{ secrets.GOOGLE_ALERT_RSS_51 }}
+          GOOGLE_ALERT_RSS_52: ${{ secrets.GOOGLE_ALERT_RSS_52 }}
+          GOOGLE_ALERT_RSS_53: ${{ secrets.GOOGLE_ALERT_RSS_53 }}
+          GOOGLE_ALERT_RSS_54: ${{ secrets.GOOGLE_ALERT_RSS_54 }}
+          GOOGLE_ALERT_RSS_55: ${{ secrets.GOOGLE_ALERT_RSS_55 }}
+          GOOGLE_ALERT_RSS_56: ${{ secrets.GOOGLE_ALERT_RSS_56 }}
+          GOOGLE_ALERT_RSS_57: ${{ secrets.GOOGLE_ALERT_RSS_57 }}
+          GOOGLE_ALERT_RSS_58: ${{ secrets.GOOGLE_ALERT_RSS_58 }}
+          GOOGLE_ALERT_RSS_59: ${{ secrets.GOOGLE_ALERT_RSS_59 }}
+          GOOGLE_ALERT_RSS_60: ${{ secrets.GOOGLE_ALERT_RSS_60 }}
+          GOOGLE_ALERT_RSS_61: ${{ secrets.GOOGLE_ALERT_RSS_61 }}
+          GOOGLE_ALERT_RSS_62: ${{ secrets.GOOGLE_ALERT_RSS_62 }}
+          GOOGLE_ALERT_RSS_63: ${{ secrets.GOOGLE_ALERT_RSS_63 }}
+          GOOGLE_ALERT_RSS_64: ${{ secrets.GOOGLE_ALERT_RSS_64 }}
+          GOOGLE_ALERT_RSS_65: ${{ secrets.GOOGLE_ALERT_RSS_65 }}
+          GOOGLE_ALERT_RSS_66: ${{ secrets.GOOGLE_ALERT_RSS_66 }}
+          GOOGLE_ALERT_RSS_67: ${{ secrets.GOOGLE_ALERT_RSS_67 }}
+          GOOGLE_ALERT_RSS_68: ${{ secrets.GOOGLE_ALERT_RSS_68 }}
+          GOOGLE_ALERT_RSS_69: ${{ secrets.GOOGLE_ALERT_RSS_69 }}
+          GOOGLE_ALERT_RSS_70: ${{ secrets.GOOGLE_ALERT_RSS_70 }}
+          GOOGLE_ALERT_RSS_71: ${{ secrets.GOOGLE_ALERT_RSS_71 }}
+          GOOGLE_ALERT_RSS_72: ${{ secrets.GOOGLE_ALERT_RSS_72 }}
+          GOOGLE_ALERT_RSS_73: ${{ secrets.GOOGLE_ALERT_RSS_73 }}
+          GOOGLE_ALERT_RSS_74: ${{ secrets.GOOGLE_ALERT_RSS_74 }}
+          GOOGLE_ALERT_RSS_75: ${{ secrets.GOOGLE_ALERT_RSS_75 }}
+          GOOGLE_ALERT_RSS_76: ${{ secrets.GOOGLE_ALERT_RSS_76 }}
+          GOOGLE_ALERT_RSS_77: ${{ secrets.GOOGLE_ALERT_RSS_77 }}
+          GOOGLE_ALERT_RSS_78: ${{ secrets.GOOGLE_ALERT_RSS_78 }}
+          GOOGLE_ALERT_RSS_79: ${{ secrets.GOOGLE_ALERT_RSS_79 }}
+          GOOGLE_ALERT_RSS_80: ${{ secrets.GOOGLE_ALERT_RSS_80 }}
+          GOOGLE_ALERT_RSS_81: ${{ secrets.GOOGLE_ALERT_RSS_81 }}
+          GOOGLE_ALERT_RSS_82: ${{ secrets.GOOGLE_ALERT_RSS_82 }}
+          GOOGLE_ALERT_RSS_83: ${{ secrets.GOOGLE_ALERT_RSS_83 }}
+          GOOGLE_ALERT_RSS_84: ${{ secrets.GOOGLE_ALERT_RSS_84 }}
+          GOOGLE_ALERT_RSS_85: ${{ secrets.GOOGLE_ALERT_RSS_85 }}
+          GOOGLE_ALERT_RSS_86: ${{ secrets.GOOGLE_ALERT_RSS_86 }}
+          GOOGLE_ALERT_RSS_87: ${{ secrets.GOOGLE_ALERT_RSS_87 }}
+          GOOGLE_ALERT_RSS_88: ${{ secrets.GOOGLE_ALERT_RSS_88 }}
+          GOOGLE_ALERT_RSS_89: ${{ secrets.GOOGLE_ALERT_RSS_89 }}
+          GOOGLE_ALERT_RSS_90: ${{ secrets.GOOGLE_ALERT_RSS_90 }}
+          GOOGLE_ALERT_RSS_91: ${{ secrets.GOOGLE_ALERT_RSS_91 }}
+
+        run: node scraper.cjs
+
+      - name: ✅ Scraper completed
+        if: success()
+        run: echo "✅ Scraper completed successfully at $(date)"
+
+      - name: ❌ Scraper failed
         if: failure()
         run: echo "❌ Scraper failed! Check the logs above."

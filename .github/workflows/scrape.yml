@@ -1,3 +1,5 @@
+name: EuroMix Scraper
+
 on:
   schedule:
     - cron: '0 */2 * * *'  # כל שעתיים
@@ -6,11 +8,11 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    
+
     concurrency:
       group: euromix-scraper
       cancel-in-progress: false
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -20,7 +22,6 @@ jobs:
         with:
           node-version: 18
 
-
       - name: Install dependencies
         run: |
           npm install
@@ -29,8 +30,6 @@ jobs:
       - name: Run Scraper
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-
-
         run: |
           echo "🚀 Starting scraper at $(date)"
           node scraper.cjs

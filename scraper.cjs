@@ -107,7 +107,6 @@ const GOOGLE_ALERT_FEEDS = [
 
 function initFirebase() {
   const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
-
   if (!serviceAccountRaw) {
     console.error("❌ FIREBASE_SERVICE_ACCOUNT missing.");
     process.exit(1);
@@ -115,13 +114,11 @@ function initFirebase() {
 
   try {
     const serviceAccount = JSON.parse(serviceAccountRaw);
-
     if (!admin.apps.length) {
       admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
       });
     }
-
     return admin.firestore();
   } catch (error) {
     console.error("❌ Error parsing service account:", error.message);
@@ -140,9 +137,7 @@ function normalizeUrl(rawUrl) {
     if (actualLink.includes("google.com/url")) {
       const urlObj = new URL(actualLink);
       const realUrl = urlObj.searchParams.get("url");
-      if (realUrl) {
-        actualLink = decodeURIComponent(realUrl);
-      }
+      if (realUrl) actualLink = decodeURIComponent(realUrl);
     }
   } catch (_) {}
 
@@ -165,9 +160,13 @@ function extractSource(link) {
 }
 
 function cleanText(value, maxLength = null) {
-  const text = typeof value === "string" ? value : String(value || "");
-  const cleaned = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-  return maxLength ? cleaned.slice(0, maxLength).trim() : cleaned;
+  try {
+    const text = typeof value === "string" ? value : String(value || "");
+    const cleaned = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    return maxLength ? cleaned.slice(0, maxLength).trim() : cleaned;
+  } catch (_) {
+    return "";
+  }
 }
 
 function toIsoDate(value) {
@@ -177,16 +176,23 @@ function toIsoDate(value) {
 }
 
 function mapFeedItem(item) {
-  const link = normalizeUrl(item.link || "");
-
+  const link = normalizeUrl(item?.link || "");
   return {
-    title: cleanText(item.title || "", 500),
+    title: cleanText(item?.title || "", 500),
     link,
     source: extractSource(link),
-    img: item.enclosure?.url || null,
-    pubDate: toIsoDate(item.pubDate),
-    snippet: cleanText(item.contentSnippet || item.title || "", 200),
+    img: item?.enclosure?.url || null,
+    pubDate: toIsoDate(item?.pubDate),
+    snippet: cleanText(item?.contentSnippet || item?.title || "", 200),
   };
+}
+
+function dedupeByLink(items) {
+  return Array.from(new Map(items.map((item) => [item.link, item])).values());
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function pushArticleToWordPress(article) {
@@ -234,18 +240,62 @@ async function pushArticlesToWordPress(articles) {
   let success = 0;
   let failed = 0;
 
-  for (const article of articles) {
+  for (const [index, article] of articles.entries()) {
     try {
       const result = await pushArticleToWordPress(article);
       success++;
-      console.log(`🌐 WP imported: ${article.link} -> ${result.received || "ok"}`);
+      console.log(`🌐 [${index + 1}/${articles.length}] WP imported: ${article.link} -> ${result.received || "ok"}`);
     } catch (error) {
       failed++;
-      console.error(`❌ WP import failed for ${article.link}: ${error.message}`);
+      console.error(`❌ [${index + 1}/${articles.length}] WP import failed for ${article.link}: ${error.message}`);
     }
+
+    await sleep(250);
   }
 
   return { success, failed };
+}
+
+async function saveArticlesToFirestore(articles) {
+  if (!articles.length) {
+    console.log("💾 No recent articles to save to Firestore.");
+    return;
+  }
+
+  const articlesCollection = db
+    .collection("artifacts")
+    .doc(APP_ID)
+    .collection("public")
+    .doc("data")
+    .collection("articles");
+
+  let saved = 0;
+
+  for (let i = 0; i < articles.length; i += 400) {
+    const slice = articles.slice(i, i + 400);
+    const batch = db.batch();
+
+    slice.forEach((article) => {
+      const docRef = articlesCollection.doc();
+      batch.set(docRef, {
+        ...article,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        status: "new",
+        flagged: false,
+        publishedSite: false,
+        publishedSocialHe: false,
+        publishedSocialEn: false,
+        translationComplete: false,
+        assignedTo: null,
+        isCustom: false,
+        hasCountedWriting: false,
+      });
+    });
+
+    await batch.commit();
+    saved += slice.length;
+    console.log(`💾 Saved ${saved}/${articles.length} articles to Firestore`);
+  }
 }
 
 async function run() {
@@ -258,7 +308,7 @@ async function run() {
 
     const parser = new Parser({
       headers: {
-        "User-Agent": "NodeJS:euromix-scraper:v1.1 (by /u/Fluffy_Care7919)",
+        "User-Agent": "NodeJS:euromix-scraper:v1.2 (by /u/Fluffy_Care7919)",
         Accept: "application/rss+xml, application/xml, text/xml",
       },
       timeout: 30000,
@@ -294,69 +344,23 @@ async function run() {
     console.log(`📊 Feeds processed: ${successCount} success, ${failCount} failed`);
     console.log(`📦 Total items collected: ${allArticles.length}`);
 
-    if (allArticles.length === 0) {
+    if (!allArticles.length) {
       console.log("⚠️ No articles found");
       process.exit(0);
     }
 
-    const uniqueArticles = Array.from(new Map(allArticles.map((item) => [item.link, item])).values());
-    console.log(`🔎 Unique articles (after dedup): ${uniqueArticles.length}`);
+    const uniqueArticles = dedupeByLink(allArticles);
+    console.log(`🔎 Unique articles (after in-memory dedup): ${uniqueArticles.length}`);
 
-    const now = new Date();
-    const cutoffTime = new Date(now.getTime() - MAX_AGE_HOURS * 60 * 60 * 1000);
+    const cutoffTime = new Date(Date.now() - MAX_AGE_HOURS * 60 * 60 * 1000);
     const recentArticles = uniqueArticles.filter((article) => new Date(article.pubDate) >= cutoffTime);
     console.log(`🔎 Recent articles (${MAX_AGE_HOURS}h): ${recentArticles.length}`);
 
-    const articlesCollection = db
-      .collection("artifacts")
-      .doc(APP_ID)
-      .collection("public")
-      .doc("data")
-      .collection("articles");
+    console.log(`⏭️ Skipping Firestore duplicate check. Using ${recentArticles.length} recent articles directly.`);
 
-    const linksToCheck = recentArticles.map((article) => article.link);
-    const existingLinks = new Set();
-    let totalReads = 0;
+    await saveArticlesToFirestore(recentArticles);
 
-    console.log(`🔍 Checking ${linksToCheck.length} links for duplicates...`);
-
-    for (let i = 0; i < linksToCheck.length; i += 10) {
-      const batchLinks = linksToCheck.slice(i, i + 10);
-      const snapshot = await articlesCollection.where("link", "in", batchLinks).select("link").get();
-      totalReads += snapshot.size;
-      snapshot.docs.forEach((doc) => existingLinks.add(doc.data().link));
-    }
-
-    const newArticles = recentArticles.filter((article) => !existingLinks.has(article.link));
-    console.log(`📦 Checked ${linksToCheck.length} links (${totalReads} reads), found ${newArticles.length} new articles`);
-
-    if (newArticles.length > 0) {
-      const batch = db.batch();
-
-      newArticles.forEach((article) => {
-        const docRef = articlesCollection.doc();
-        batch.set(docRef, {
-          ...article,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          status: "new",
-          flagged: false,
-          publishedSite: false,
-          publishedSocialHe: false,
-          publishedSocialEn: false,
-          translationComplete: false,
-          assignedTo: null,
-          isCustom: false,
-          hasCountedWriting: false,
-        });
-      });
-
-      await batch.commit();
-      console.log(`💾 Saved ${newArticles.length} articles to Firestore.`);
-    } else {
-      console.log("👌 No new articles for Firestore.");
-    }
-
-    const wpResult = await pushArticlesToWordPress(newArticles);
+    const wpResult = await pushArticlesToWordPress(recentArticles);
     console.log(`🌐 WordPress import summary: ${wpResult.success} success, ${wpResult.failed} failed`);
 
     await cleanupSmart();
@@ -387,8 +391,7 @@ async function cleanupSmart() {
     if (!allNew.empty) {
       const batch = db.batch();
       let deleteCount = 0;
-      const now = new Date();
-      const keepNewCutoff = new Date(now.getTime() - KEEP_NEW_HOURS * 60 * 60 * 1000);
+      const keepNewCutoff = new Date(Date.now() - KEEP_NEW_HOURS * 60 * 60 * 1000);
 
       allNew.docs.forEach((doc) => {
         const data = doc.data();

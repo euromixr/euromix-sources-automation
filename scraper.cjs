@@ -7,9 +7,6 @@ const MAX_AGE_HOURS = 24;           // 24 שעות ייבוא
 const KEEP_WORK_DAYS = 30;          // כתבות בתהליך - 30 יום
 const KEEP_NEW_HOURS = 48;          // כתבות new - 48 שעות
 
-
-
-
 const GOOGLE_ALERT_FEEDS = [
     "https://www.google.com/alerts/feeds/15835567105207766825/5913675776665511822",
     "https://corsproxy.io/?https://www.reddit.com/r/eurovision/new.rss",
@@ -112,16 +109,261 @@ function initFirebase() {
         console.error("❌ FIREBASE_SERVICE_ACCOUNT missing.");
         process.exit(1);
     }
-
     try {
         const serviceAccount = JSON.parse(serviceAccountRaw);
         if (!admin.apps.length) {
             admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-
-
         }
         return admin.firestore();
     } catch (error) {
-@@ -123,91 +127,155 @@
+        console.error("❌ Error parsing service account:", error.message);
+        process.exit(1);
+    }
+}
 
 const db = initFirebase();
+
+async function run() {
+    console.log("🚀 Starting scraper with Google Alerts RSS feeds...");
+    console.log(`📡 Processing ${GOOGLE_ALERT_FEEDS.length} RSS feeds...`);
+    console.log(`⏰ Importing articles from last ${MAX_AGE_HOURS} hours`);
+
+    try {
+        await updateStatusTime();
+
+const parser = new Parser({
+    headers: {
+        // רדיט דורשת User-Agent ייחודי עם פרטי מפתח
+        'User-Agent': 'NodeJS:euromix-scraper:v1.0 (by /u/Fluffy_Care7919)',
+        'Accept': 'application/rss+xml, application/xml, text/xml'
+    },
+    timeout: 30000
+});
+
+        let allArticles = [];
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const feedUrl of GOOGLE_ALERT_FEEDS) {
+            try {
+                console.log(`🔗 Fetching feed ${successCount + failCount + 1}/${GOOGLE_ALERT_FEEDS.length}...`);
+                const feed = await parser.parseURL(feedUrl);
+
+                if (feed.items && feed.items.length > 0) {
+                    const articles = feed.items.map(item => {
+                        // ✅ חילוץ Google redirect URL + ניקוי מלא
+                        let actualLink = item.link || '';
+                        let source = "Unknown";
+
+                        try {
+                            // חילוץ Google redirect URL
+                            if (actualLink.includes('google.com/url')) {
+                                const urlObj = new URL(actualLink);
+                                const realUrl = urlObj.searchParams.get('url');
+                                if (realUrl) {
+                                    actualLink = decodeURIComponent(realUrl);
+                                }
+                            }
+
+                            // ✅ ניקוי פרמטרים מיותרים (גם מקישורים ישירים)
+                            try {
+                                const cleanUrl = new URL(actualLink);
+                                actualLink = cleanUrl.origin + cleanUrl.pathname;
+                            } catch(e) {}
+
+                            // ✅ חילוץ מקור נקי
+                            try {
+                                const sourceUrl = new URL(actualLink);
+                                source = sourceUrl.hostname.replace(/^(www\.)?/, '');
+                            } catch(e) {}
+
+                        } catch (e) {
+                            console.error(`⚠️ URL parsing error for "${item.link?.substring(0,100)}...": ${e.message}`);
+                        }
+
+                        // ✅ ניקוי title/snippet - בטוח לכל סוגי הנתונים
+                        const rawTitle = item.title || '';
+                        const cleanTitle = typeof rawTitle === 'string' 
+                            ? rawTitle.replace(/<[^>]*>/g, '').trim() 
+                            : String(rawTitle).trim();
+
+                        const rawSnippet = item.contentSnippet || item.title || '';
+                        const cleanSnippet = typeof rawSnippet === 'string' 
+                            ? rawSnippet.replace(/<[^>]*>/g, '').substring(0, 200).trim()
+                            : String(rawSnippet).substring(0, 200).trim();
+
+                        return {
+                            title: cleanTitle,
+                            link: actualLink,           // ✅ קישור נקי
+                            source: source,              // ✅ מקור אמיתי
+                            img: item.enclosure?.url || null,
+                            pubDate: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
+                            snippet: cleanSnippet
+                        };
+                    });
+
+                    allArticles.push(...articles);
+                    successCount++;
+                    console.log(`✅ Found ${articles.length} items`);
+                } else {
+                    successCount++;
+                    console.log(`⚠️ Feed empty`);
+                }
+            } catch (error) {
+                failCount++;
+                console.error(`❌ Feed error: ${error.message}`);
+            }
+        }
+
+        console.log(`📊 Feeds processed: ${successCount} success, ${failCount} failed`);
+        console.log(`📦 Total items collected: ${allArticles.length}`);
+
+        if (allArticles.length === 0) {
+            console.log("⚠️ No articles found");
+            process.exit(0);
+        }
+
+        // ✅ זיהוי כפילויות - לפי link
+        const uniqueArticles = Array.from(new Map(allArticles.map(item => [item.link, item])).values());
+        console.log(`🔎 Unique articles (after dedup): ${uniqueArticles.length}`);
+
+        // ✅ רק מ-24 שעות אחרונות
+        const now = new Date();
+        const cutoffTime = new Date(now.getTime() - (MAX_AGE_HOURS * 60 * 60 * 1000));
+        const recentArticles = uniqueArticles.filter(article => {
+            const pubDate = new Date(article.pubDate);
+            return pubDate >= cutoffTime;
+        });
+
+        console.log(`🔎 Recent articles (${MAX_AGE_HOURS}h): ${recentArticles.length}`);
+
+        const articlesCollection = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
+
+        // ✅ בדיקת כפילויות מול Firestore
+        const linksToCheck = recentArticles.map(a => a.link);
+        const existingLinks = new Set();
+        let totalReads = 0;
+
+        console.log(`🔍 Checking ${linksToCheck.length} links for duplicates...`);
+        for (let i = 0; i < linksToCheck.length; i += 10) {
+            const batch = linksToCheck.slice(i, i + 10);
+            const snapshot = await articlesCollection.where('link', 'in', batch).select('link').get();
+            totalReads += snapshot.size;
+            snapshot.docs.forEach(doc => existingLinks.add(doc.data().link));
+        }
+
+        const newArticles = recentArticles.filter(a => !existingLinks.has(a.link));
+        console.log(`📦 Checked ${linksToCheck.length} links (${totalReads} reads), found ${newArticles.length} new articles`);
+
+        // ✅ אין הגבלה על מספר כתבות לייבוא
+        if (newArticles.length > 0) {
+            const batch = db.batch();
+            newArticles.forEach(article => {
+                const docRef = articlesCollection.doc();
+                batch.set(docRef, {
+                    ...article,
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    status: 'new',
+                    flagged: false,
+                    publishedSite: false,
+                    publishedSocialHe: false,
+                    publishedSocialEn: false,
+                    translationComplete: false,
+                    assignedTo: null,
+                    isCustom: false,
+                    hasCountedWriting: false
+                });
+            });
+            await batch.commit();
+            console.log(`💾 Saved ${newArticles.length} articles.`);
+        } else {
+            console.log("👌 No new articles.");
+        }
+
+        await cleanupSmart();
+        await updateStatusTime();
+        console.log("🎉 Scraper finished successfully!");
+
+    } catch (e) {
+        console.error("❌ Error:", e.message);
+        console.error("Stack:", e.stack);
+        process.exit(1);
+    }
+}
+
+async function cleanupSmart() {
+    console.log("🧹 Smart cleanup...");
+    try {
+        const articlesRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
+
+        // ✅ כתבות 'new' - מחיקה לאחר 48 שעות
+        const allNew = await articlesRef.where('status', '==', 'new').get();
+        console.log(`📊 ${allNew.size} articles with status 'new'.`);
+
+        if (!allNew.empty) {
+            const batch = db.batch();
+            let deleteCount = 0;
+            const now = new Date();
+            const keepNewCutoff = new Date(now.getTime() - (KEEP_NEW_HOURS * 60 * 60 * 1000));
+
+            allNew.docs.forEach(doc => {
+                const data = doc.data();
+                const pubDate = data.pubDate ? new Date(data.pubDate) : new Date(0);
+
+                if (pubDate < keepNewCutoff) {
+                    batch.delete(doc.ref);
+                    deleteCount++;
+                }
+            });
+
+            if (deleteCount > 0) {
+                await batch.commit();
+                console.log(`🗑️ Deleted ${deleteCount} 'new' articles older than ${KEEP_NEW_HOURS} hours.`);
+            } else {
+                console.log(`✅ No 'new' articles older than ${KEEP_NEW_HOURS} hours.`);
+            }
+        }
+
+        // ✅ כתבות בתהליך (לא 'new') - מחיקה לאחר 30 יום
+        console.log("🧹 Checking articles in process (not 'new')...");
+        const allArticles = await articlesRef.where('status', '!=', 'new').get();
+        console.log(`📊 ${allArticles.size} articles in process.`);
+
+        if (!allArticles.empty) {
+            const workBatch = db.batch();
+            let workDeleteCount = 0;
+            const thirtyDaysAgo = new Date(Date.now() - (KEEP_WORK_DAYS * 24 * 60 * 60 * 1000));
+
+            allArticles.docs.forEach(doc => {
+                const data = doc.data();
+                const createdDate = data.createdAt ? data.createdAt.toDate() : new Date(0);
+
+                if (createdDate < thirtyDaysAgo) {
+                    workBatch.delete(doc.ref);
+                    workDeleteCount++;
+                }
+            });
+
+            if (workDeleteCount > 0) {
+                await workBatch.commit();
+                console.log(`🗑️ Deleted ${workDeleteCount} articles in process older than ${KEEP_WORK_DAYS} days.`);
+            } else {
+                console.log(`✅ No articles in process older than ${KEEP_WORK_DAYS} days.`);
+            }
+        }
+
+        const totalCount = await articlesRef.count().get();
+        console.log(`📊 Total articles in DB: ${totalCount.data().count}`);
+
+    } catch (error) {
+        console.error("⚠️ Cleanup error:", error.message);
+    }
+}
+
+async function updateStatusTime() {
+    try {
+        await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('settings').doc('status').set({ lastScrape: admin.firestore.Timestamp.now() }, { merge: true });
+    } catch(e) {}
+}
+
+run();

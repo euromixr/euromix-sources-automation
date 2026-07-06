@@ -11,6 +11,10 @@ const KEEP_NEW_HOURS = 48;          // כתבות new - 48 שעות
 const WP_API_ROOT = process.env.WP_API_ROOT || "https://euro-mix.co.il/wp-json";
 const EUROMIX_IMPORT_SECRET = process.env.EUROMIX_IMPORT_SECRET || "my-test-secret-123";
 
+// Cleanup thresholds mirrored from Firestore, applied to WordPress source-items table
+const WP_KEEP_NEW_HOURS = KEEP_NEW_HOURS; // status 'new' -> delete after 48h
+const WP_KEEP_WORK_DAYS = KEEP_WORK_DAYS; // any other status -> delete after 30 days
+
 const GOOGLE_ALERT_FEEDS = [
     "https://www.google.com/alerts/feeds/15835567105207766825/5913675776665511822",
     "https://corsproxy.io/?https://www.reddit.com/r/eurovision/new.rss",
@@ -329,8 +333,12 @@ async function run() {
             console.log("👌 No new articles for WordPress Database.");
         }
 
-        // ביצוע ניקוי חכם מקורי
+        // ביצוע ניקוי חכם מקורי (Firestore)
         await cleanupSmart();
+
+        // ביצוע ניקוי חכם על טבלת ה-WordPress
+        await cleanupWordPress();
+
         await updateStatusTime();
         console.log("🎉 Scraper finished successfully!");
 
@@ -407,6 +415,26 @@ async function cleanupSmart() {
 
     } catch (error) {
         console.error("⚠️ Cleanup error:", error.message);
+    }
+}
+
+async function cleanupWordPress() {
+    console.log("🧹 WordPress cleanup running...");
+    try {
+        const res = await axios.post(`${WP_API_ROOT}/euromix/v1/cleanup-source-items`, {
+            keepNewHours: WP_KEEP_NEW_HOURS,
+            keepWorkDays: WP_KEEP_WORK_DAYS
+        }, {
+            headers: {
+                'Content-Type': 'application/json',
+                'x-euromix-secret': EUROMIX_IMPORT_SECRET
+            }
+        });
+        if (res.status === 200 && res.data) {
+            console.log(`🗑️ WordPress cleanup: deleted ${res.data.deletedNew || 0} 'new' items, ${res.data.deletedWork || 0} in-process items.`);
+        }
+    } catch (e) {
+        console.warn("⚠️ WordPress cleanup failed (endpoint may be missing):", e.message);
     }
 }
 

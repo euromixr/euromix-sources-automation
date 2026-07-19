@@ -178,7 +178,7 @@ function makeAbsoluteUrl(maybeRelative, baseUrl) {
 
 async function fetchPageMeta(url) {
     if (isBlockedHost(url)) {
-        return { img: '', description: '', title: '', ok: false };
+        return { img: '', description: '', title: '', paragraphs: '', ok: false };
     }
     try {
         const res = await axios.get(url, {
@@ -188,11 +188,20 @@ async function fetchPageMeta(url) {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9'
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.google.com/'
             },
             validateStatus: (status) => status >= 200 && status < 300
         });
         const html = String(res.data || '');
+
+        const decode = (s) => String(s || '')
+            .replace(/&quot;|&#34;/g, '"')
+            .replace(/&amp;|&#38;/g, '&')
+            .replace(/&nbsp;|&#160;/g, ' ')
+            .replace(/&#39;|&apos;/g, "'")
+            .replace(/\s+/g, ' ')
+            .trim();
 
         const ogImageMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
             || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
@@ -205,26 +214,37 @@ async function fetchPageMeta(url) {
         const ogTitleMatch = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)
             || html.match(/<title>([^<]+)<\/title>/i);
 
-        const decode = (s) => String(s || '')
-            .replace(/&quot;|&#34;/g, '"')
-            .replace(/&amp;|&#38;/g, '&')
-            .replace(/&nbsp;|&#160;/g, ' ')
-            .replace(/&#39;|&apos;/g, "'")
-            .replace(/\s+/g, ' ')
-            .trim();
+        // NEW: חילוץ פסקאות מלאות מה-body, כמו ב-euromix_fetch_content_handler ב-PHP
+        let bodyParagraphs = '';
+        const pMatches = html.match(/<p[^>]*>([\s\S]*?)<\/p>/gi) || [];
+        const cleanParagraphs = pMatches
+            .map(p => decode(p.replace(/<[^>]*>/g, ' ')))
+            .filter(text => text.length >= 60);
+        if (cleanParagraphs.length > 0) {
+            bodyParagraphs = cleanParagraphs.slice(0, 3).join(' ');
+        }
+
+        const metaDesc = decode(ogDescMatch && ogDescMatch[1]);
+        // עדיפות לתקציר עשיר מהפסקאות אם הוא ארוך יותר ומשמעותי מה-meta description הקצר
+        const bestDescription = (bodyParagraphs && bodyParagraphs.length > metaDesc.length)
+            ? bodyParagraphs
+            : (metaDesc || bodyParagraphs);
 
         return {
             img: rawImg ? makeAbsoluteUrl(rawImg, url) : '',
-            description: decode(ogDescMatch && ogDescMatch[1]),
+            description: bestDescription.substring(0, 500),
             title: decode(ogTitleMatch && ogTitleMatch[1]),
             ok: true
         };
     } catch (e) {
-        console.warn(`⚠️ fetchPageMeta failed for ${url}: ${e.message}`);
+        if (e.response?.status === 403) {
+            console.warn(`⚠️ fetchPageMeta 403 (blocked by WAF) for ${url}`);
+        } else {
+            console.warn(`⚠️ fetchPageMeta failed for ${url}: ${e.message}`);
+        }
         return { img: '', description: '', title: '', ok: false };
     }
 }
-
 async function hydrateArticle(article) {
     const meta = await fetchPageMeta(article.link);
     await sleep(200);

@@ -6,6 +6,8 @@ const APP_ID = 'euromix-pro-v4-wp';
 const MAX_AGE_HOURS = 24;           // 24 שעות ייבוא
 const KEEP_WORK_DAYS = 30;          // כתבות בתהליך - 30 יום
 const KEEP_NEW_HOURS = 48;          // כתבות new - 48 שעות
+const MAX_HYDRATE_PER_RUN = 40;     // מגבלת hydration לריצה (למנוע ריצה ארוכה מדי)
+const HYDRATE_DELAY_MS = 500;       // delay בין כתבות ל-rate limiting
 
 // הגדרות WordPress API (ייקרא מתוך Environment Variables של GitHub Actions במידה וקיים)
 const WP_API_ROOT = process.env.WP_API_ROOT || "https://euro-mix.co.il/wp-json";
@@ -14,6 +16,9 @@ const EUROMIX_IMPORT_SECRET = process.env.EUROMIX_IMPORT_SECRET || "my-test-secr
 // Cleanup thresholds mirrored from Firestore, applied to WordPress source-items table
 const WP_KEEP_NEW_HOURS = KEEP_NEW_HOURS; // status 'new' -> delete after 48h
 const WP_KEEP_WORK_DAYS = KEEP_WORK_DAYS; // any other status -> delete after 30 days
+
+// דומיינים שידועים כחוסמים / לא נותנים og:tags דרך fetch פשוט - לדלג עליהם מראש
+const BLOCKED_HOSTS = ['facebook.com', 'instagram.com', 'twitter.com', 'x.com'];
 
 const GOOGLE_ALERT_FEEDS = [
     "https://www.google.com/alerts/feeds/15835567105207766825/5913675776665511822",
@@ -129,6 +134,150 @@ function initFirebase() {
 
 const db = initFirebase();
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ==========================================
+// Hydration helpers: תרגום + תקציר + תמונה
+// ==========================================
+
+async function translateText(text, targetLang) {
+    if (!text) return '';
+    try {
+        const res = await axios.get('https://translate.googleapis.com/translate_a/single', {
+            params: { client: 'gtx', sl: 'auto', tl: targetLang, dt: 't', q: text },
+            timeout: 10000,
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' }
+        });
+        const json = res.data;
+        if (Array.isArray(json) && Array.isArray(json[0])) {
+            return json[0].map(part => (Array.isArray(part) ? part[0] : '')).join('').trim();
+        }
+    } catch (e) {
+        console.warn(`⚠️ Translate(${targetLang}) failed for "${String(text).substring(0, 40)}...": ${e.message}`);
+    }
+    return '';
+}
+
+function isBlockedHost(url) {
+    try {
+        const host = new URL(url).hostname.replace(/^www\./, '');
+        return BLOCKED_HOSTS.some(b => host.includes(b));
+    } catch (e) {
+        return false;
+    }
+}
+
+function makeAbsoluteUrl(maybeRelative, baseUrl) {
+    if (!maybeRelative) return '';
+    try {
+        return new URL(maybeRelative, baseUrl).href;
+    } catch (e) {
+        return '';
+    }
+}
+
+async function fetchPageMeta(url) {
+    if (isBlockedHost(url)) {
+        return { img: '', description: '', title: '', ok: false };
+    }
+    try {
+        const res = await axios.get(url, {
+            timeout: 15000,
+            maxContentLength: 3 * 1024 * 1024,
+            maxRedirects: 5,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9'
+            },
+            validateStatus: (status) => status >= 200 && status < 300
+        });
+        const html = String(res.data || '');
+
+        const ogImageMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+            || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+        const twImageMatch = html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
+        const anyImgMatch = html.match(/<img[^>]+src=["']([^"']+)["']/i);
+        const rawImg = (ogImageMatch && ogImageMatch[1]) || (twImageMatch && twImageMatch[1]) || (anyImgMatch && anyImgMatch[1]) || '';
+
+        const ogDescMatch = html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)
+            || html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i);
+        const ogTitleMatch = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)
+            || html.match(/<title>([^<]+)<\/title>/i);
+
+        const decode = (s) => String(s || '')
+            .replace(/&quot;|&#34;/g, '"')
+            .replace(/&amp;|&#38;/g, '&')
+            .replace(/&nbsp;|&#160;/g, ' ')
+            .replace(/&#39;|&apos;/g, "'")
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        return {
+            img: rawImg ? makeAbsoluteUrl(rawImg, url) : '',
+            description: decode(ogDescMatch && ogDescMatch[1]),
+            title: decode(ogTitleMatch && ogTitleMatch[1]),
+            ok: true
+        };
+    } catch (e) {
+        console.warn(`⚠️ fetchPageMeta failed for ${url}: ${e.message}`);
+        return { img: '', description: '', title: '', ok: false };
+    }
+}
+
+async function hydrateArticle(article) {
+    const meta = await fetchPageMeta(article.link);
+    await sleep(200);
+
+    const baseTitle = meta.title || article.title || '';
+    const baseSnippet = meta.description || article.snippet || '';
+
+    const [titleHe, titleEn, snippetHe, snippetEn] = await Promise.all([
+        translateText(baseTitle, 'he'),
+        translateText(baseTitle, 'en'),
+        translateText(baseSnippet, 'he'),
+        translateText(baseSnippet, 'en'),
+    ]);
+
+    return {
+        ...article,
+        title: baseTitle || article.title,
+        snippet: baseSnippet || article.snippet,
+        img: meta.img || article.img || '',
+        titleHe: titleHe || '',
+        titleEn: titleEn || '',
+        snippetHe: snippetHe || '',
+        snippetEn: snippetEn || '',
+        translationComplete: !!((titleHe && titleEn) && (snippetHe || snippetEn)),
+    };
+}
+
+async function hydrateArticlesBatch(articles) {
+    const toHydrate = articles.slice(0, MAX_HYDRATE_PER_RUN);
+    const rest = articles.slice(MAX_HYDRATE_PER_RUN);
+
+    if (rest.length > 0) {
+        console.log(`ℹ️ Hydrating first ${toHydrate.length} articles this run, ${rest.length} will be saved without hydration and picked up later.`);
+    }
+
+    const hydrated = [];
+    for (let i = 0; i < toHydrate.length; i++) {
+        const article = toHydrate[i];
+        console.log(`   🌐 [${i + 1}/${toHydrate.length}] Hydrating: ${article.link.substring(0, 70)}...`);
+        try {
+            const h = await hydrateArticle(article);
+            hydrated.push(h);
+        } catch (e) {
+            console.warn(`   ⚠️ Hydration failed for ${article.link}: ${e.message}`);
+            hydrated.push(article);
+        }
+        await sleep(HYDRATE_DELAY_MS);
+    }
+
+    // כתבות שלא הגיעו ל-hydration בריצה זו - נשמרות כמו שהן (ייעברו hydration בריצה הבאה, אם תרצה להוסיף לוגיקה כזו בעתיד)
+    return [...hydrated, ...rest];
+}
+
 async function run() {
     console.log("🚀 Starting scraper with Google Alerts RSS feeds...");
     console.log(`📡 Processing ${GOOGLE_ALERT_FEEDS.length} RSS feeds...`);
@@ -173,25 +322,25 @@ async function run() {
                             try {
                                 const cleanUrl = new URL(actualLink);
                                 actualLink = cleanUrl.origin + cleanUrl.pathname;
-                            } catch(e) {}
+                            } catch (e) {}
 
                             // חילוץ מקור נקי
                             try {
                                 const sourceUrl = new URL(actualLink);
                                 source = sourceUrl.hostname.replace(/^(www\.)?/, '');
-                            } catch(e) {}
+                            } catch (e) {}
 
                         } catch (e) {
-                            console.error(`⚠️ URL parsing error for "${item.link?.substring(0,100)}...": ${e.message}`);
+                            console.error(`⚠️ URL parsing error for "${item.link?.substring(0, 100)}...": ${e.message}`);
                         }
 
                         const rawTitle = item.title || '';
-                        const cleanTitle = typeof rawTitle === 'string' 
-                            ? rawTitle.replace(/<[^>]*>/g, '').trim() 
+                        const cleanTitle = typeof rawTitle === 'string'
+                            ? rawTitle.replace(/<[^>]*>/g, '').trim()
                             : String(rawTitle).trim();
 
                         const rawSnippet = item.contentSnippet || item.title || '';
-                        const cleanSnippet = typeof rawSnippet === 'string' 
+                        const cleanSnippet = typeof rawSnippet === 'string'
                             ? rawSnippet.replace(/<[^>]*>/g, '').substring(0, 200).trim()
                             : String(rawSnippet).substring(0, 200).trim();
 
@@ -226,21 +375,19 @@ async function run() {
         console.log(`🔎 סינון: ${recentArticles.length} כתבות ב- ${MAX_AGE_HOURS} השעות האחרונות.`);
 
         // ==========================================
-        // מנגנון 1: בדיקת כפילויות ושמירה ל-Firestore
+        // מנגנון 1: בדיקת כפילויות מול Firestore
         // ==========================================
-        const articlesCollection = db.collection('artifacts').doc(APP_ID).collection('public').document ? null : db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
+        const articlesCollection = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('articles');
         let newArticles = [];
 
-        if (recentArticles.length > 0 && articlesCollection) {
+        if (recentArticles.length > 0) {
             const linksToCheck = recentArticles.map(a => a.link);
             const existingLinks = new Set();
-            let totalReads = 0;
 
             console.log(`🔍 Checking ${linksToCheck.length} links for duplicates in Firestore...`);
             for (let i = 0; i < linksToCheck.length; i += 10) {
                 const batch = linksToCheck.slice(i, i + 10);
                 const snapshot = await articlesCollection.where('link', 'in', batch).select('link').get();
-                totalReads += snapshot.size;
                 snapshot.docs.forEach(doc => existingLinks.add(doc.data().link));
             }
 
@@ -248,35 +395,10 @@ async function run() {
             console.log(`📦 Checked ${linksToCheck.length} links in Firestore, found ${newArticles.length} new articles`);
         }
 
-        if (newArticles.length > 0 && articlesCollection) {
-            const batch = db.batch();
-            newArticles.forEach(article => {
-                const docRef = articlesCollection.doc();
-                batch.set(docRef, {
-                    ...article,
-                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                    status: 'new',
-                    flagged: false,
-                    publishedSite: false,
-                    publishedSocialHe: false,
-                    publishedSocialEn: false,
-                    translationComplete: false,
-                    assignedTo: null,
-                    isCustom: false,
-                    hasCountedWriting: false,
-                    isDeleted: false
-                });
-            });
-            await batch.commit();
-            console.log(`💾 Saved ${newArticles.length} articles to Firestore.`);
-        } else {
-            console.log("👌 No new articles for Firestore.");
-        }
-
         // ==========================================
-        // מנגנון 2: בדיקת כפילויות ושמירה ל-WordPress Custom DB Table (חדש)
+        // מנגנון 2: בדיקת כפילויות מול WordPress
         // ==========================================
-        console.log("🔍 Checking duplicates and importing to WordPress Database...");
+        console.log("🔍 Checking duplicates against WordPress Database...");
         let wpExistingLinks = new Set();
         try {
             const wpResponse = await axios.get(`${WP_API_ROOT}/euromix/v1/get-source-items`);
@@ -292,18 +414,72 @@ async function run() {
         const newWPArticles = recentArticles.filter(a => !wpExistingLinks.has(a.link));
         console.log(`📦 WordPress: Checked ${recentArticles.length} links, found ${newWPArticles.length} new articles.`);
 
+        // ==========================================
+        // Hydration: תרגום + תקציר + תמונה עבור כתבות חדשות
+        // ==========================================
+        // מאחדים את קבוצת ה-links החדשים (union בין Firestore ל-WordPress) כדי לא לבצע hydration כפול
+        const allNewLinksMap = new Map();
+        newArticles.forEach(a => allNewLinksMap.set(a.link, a));
+        newWPArticles.forEach(a => { if (!allNewLinksMap.has(a.link)) allNewLinksMap.set(a.link, a); });
+        const allNewUnique = Array.from(allNewLinksMap.values());
+
+        let hydratedMap = new Map();
+        if (allNewUnique.length > 0) {
+            console.log(`🌐 Starting hydration (translate + snippet + image) for ${allNewUnique.length} unique new articles...`);
+            const hydrated = await hydrateArticlesBatch(allNewUnique);
+            hydrated.forEach(h => hydratedMap.set(h.link, h));
+            console.log(`✅ Hydration finished for this run.`);
+        } else {
+            console.log("👌 No new unique articles to hydrate.");
+        }
+
+        const hydrate = (article) => hydratedMap.get(article.link) || article;
+
+        // ==========================================
+        // שמירה ל-Firestore
+        // ==========================================
+        if (newArticles.length > 0) {
+            const batch = db.batch();
+            newArticles.forEach(article => {
+                const finalArticle = hydrate(article);
+                const docRef = articlesCollection.doc();
+                batch.set(docRef, {
+                    ...finalArticle,
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    status: 'new',
+                    flagged: false,
+                    publishedSite: false,
+                    publishedSocialHe: false,
+                    publishedSocialEn: false,
+                    translationComplete: !!finalArticle.translationComplete,
+                    assignedTo: null,
+                    isCustom: false,
+                    hasCountedWriting: false,
+                    isDeleted: false
+                });
+            });
+            await batch.commit();
+            console.log(`💾 Saved ${newArticles.length} hydrated articles to Firestore.`);
+        } else {
+            console.log("👌 No new articles for Firestore.");
+        }
+
+        // ==========================================
+        // שמירה ל-WordPress Custom DB Table
+        // ==========================================
         if (newWPArticles.length > 0) {
             let wpSavedCount = 0;
             for (const article of newWPArticles) {
+                const finalArticle = hydrate(article);
                 try {
                     const res = await axios.post(`${WP_API_ROOT}/euromix/v1/import-source-item`, {
-                        ...article,
+                        ...finalArticle,
                         status: 'new',
                         flagged: false,
                         publishedSite: false,
                         publishedSocialHe: false,
                         publishedSocialEn: false,
-                        translationComplete: false,
+                        translationComplete: !!finalArticle.translationComplete,
                         assignedTo: null,
                         isCustom: false,
                         hasCountedWriting: false,
@@ -321,14 +497,14 @@ async function run() {
                     console.error(`⚠️ Error saving article to WordPress (${article.link}): ${err.message}`);
                 }
             }
-            console.log(`💾 Saved ${wpSavedCount} articles directly to WordPress Table.`);
+            console.log(`💾 Saved ${wpSavedCount} hydrated articles directly to WordPress Table.`);
 
             // עדכון מועד הסריקה האחרון בוורדפרס
             try {
                 await axios.post(`${WP_API_ROOT}/euromix/v1/update-status`, {
                     lastScrape: new Date().toISOString()
                 });
-            } catch(e) {}
+            } catch (e) {}
         } else {
             console.log("👌 No new articles for WordPress Database.");
         }
@@ -442,7 +618,7 @@ async function updateStatusTime() {
     try {
         const settingsRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('settings').doc('status');
         await settingsRef.set({ lastScrape: admin.firestore.Timestamp.now() }, { merge: true });
-    } catch(e) {
+    } catch (e) {
         console.error("⚠️ Failed to update Firestore last scrape time:", e.message);
     }
 }

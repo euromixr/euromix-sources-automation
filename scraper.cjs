@@ -268,7 +268,7 @@ async function hydrateArticle(article) {
         titleEn: titleEn || '',
         snippetHe: snippetHe || '',
         snippetEn: snippetEn || '',
-        translationComplete: !!((titleHe && titleEn) && (snippetHe || snippetEn)),
+        autoTranslated: !!((titleHe && titleEn) && (snippetHe || snippetEn)),
     };
 }
 
@@ -471,7 +471,8 @@ async function run() {
                     publishedSite: false,
                     publishedSocialHe: false,
                     publishedSocialEn: false,
-                    translationComplete: !!finalArticle.translationComplete,
+                    translationComplete: false,
+                    autoTranslated: !!finalArticle.autoTranslated,
                     assignedTo: null,
                     isCustom: false,
                     hasCountedWriting: false,
@@ -499,7 +500,8 @@ async function run() {
                         publishedSite: false,
                         publishedSocialHe: false,
                         publishedSocialEn: false,
-                        translationComplete: !!finalArticle.translationComplete,
+                        translationComplete: false,
+                        autoTranslated: !!finalArticle.autoTranslated,
                         assignedTo: null,
                         isCustom: false,
                         hasCountedWriting: false,

@@ -2,7 +2,7 @@ name: EuroMix Scraper
 
 on:
   schedule:
-    - cron: '0 */2 * * *'  # כל שעתיים
+    - cron: '0 */2 * * *'
   workflow_dispatch:
 
 jobs:
@@ -23,9 +23,7 @@ jobs:
           node-version: 18
 
       - name: Install dependencies
-        run: |
-          npm install
-          npx playwright install chromium --with-deps
+        run: npm install
 
       - name: Run Scraper
         env:
@@ -36,7 +34,7 @@ jobs:
           echo "🚀 Starting scraper at $(date)"
           node scraper.cjs
           echo "✅ Finished scraper at $(date)"
-        
+
       - name: Notify on failure
         if: failure()
         run: echo "❌ Scraper failed! Check the logs above."

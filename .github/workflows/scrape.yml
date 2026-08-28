@@ -1,10 +1,25 @@
+name: EuroMix Scraper
 
+on:
   schedule:
     - cron: '0 */2 * * *'  # כל שעתיים
   workflow_dispatch:
 
 jobs:
-@@ -23,9 +23,7 @@ jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: euromix-scraper
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
           node-version: 18
 
       - name: Install dependencies
@@ -14,7 +29,10 @@ jobs:
 
       - name: Run Scraper
         env:
-@@ -36,7 +34,7 @@ jobs:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          WP_API_ROOT: ${{ secrets.WP_API_ROOT }}
+          EUROMIX_IMPORT_SECRET: ${{ secrets.EUROMIX_IMPORT_SECRET }}
+        run: |
           echo "🚀 Starting scraper at $(date)"
           node scraper.cjs
           echo "✅ Finished scraper at $(date)"
